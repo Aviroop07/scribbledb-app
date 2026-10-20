@@ -237,7 +237,7 @@ def build(schema: str, triggers: str, stages: list[dict], seed: int) -> dict:
         buf = io.StringIO()
         t0 = time.time()
         try:
-            ns = load_module(st["code"], f"stage_{st['index']:02d}.py")
+            ns = load_module(st["code"], f"stage_{st['index'] + 1:02d}.py")  # 1-based, as the UI and the package name it
             gen = ns.get("generate")
             if not callable(gen):
                 raise ValueError("the program defines no generate(db, rng) function")

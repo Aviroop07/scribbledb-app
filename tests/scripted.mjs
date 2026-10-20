@@ -32,8 +32,12 @@ const BOOK_REVISED = BOOK_OK.replace("r.randint(1, s)", "r.randint(1, max(1, s *
 const AUDIT_RULE = { op: "add", id: "rarely_full", statement: "At most 5% of bookings fill their room to more than 90% of its seats.", tables: ["room", "booking"],
   code: "def verify_rarely_full(db):\n    rows = db.query('SELECT b.people, r.seats FROM booking b JOIN room r USING(room_id)')\n    if not rows:\n        return {'passed': False, 'detail': 'empty'}\n    full = sum(1 for p, s in rows if p * 10 > 9 * s)\n    return {'passed': full * 20 <= len(rows), 'detail': f'{full}/{len(rows)}'}" };
 
-// options: auditorNeverReports - the auditor only ever queries (the incomplete-audit path)
-export function scriptedModel({ auditorNeverReports = false } = {}) {
+// the audit rule with a bug: it divides by the row count, so it raises on an empty database
+const AUDIT_RULE_BROKEN = { ...AUDIT_RULE, code: AUDIT_RULE.code.replace("    if not rows:\n        return {'passed': False, 'detail': 'empty'}\n", "").replace("full * 20 <= len(rows)", "full / len(rows) <= 0.05") };
+
+// options: auditorNeverReports - the auditor only ever queries (the incomplete-audit path);
+//          brokenRuleFirst - the round-1 rule raises on an empty database until the auditor is told so
+export function scriptedModel({ auditorNeverReports = false, brokenRuleFirst = false } = {}) {
   const seen = { code: {}, audit: 0, auditTurns: 0, spec: 0 };
   return {
     seen,
@@ -54,8 +58,13 @@ export function scriptedModel({ auditorNeverReports = false } = {}) {
       if (system === AUDIT_SYSTEM) {
         seen.auditTurns++;
         if (auditorNeverReports) return { text: JSON.stringify({ action: "query", seed: 0, sql: "SELECT 1" }) };
+        if (/^Some findings were rejected/.test(last)) {
+          seen.corrections = (seen.corrections || 0) + 1;
+          return { text: JSON.stringify({ action: "report", flaws: [{ id: "full_rooms", severity: "high", title: "rooms often full", evidence: "x", rule: AUDIT_RULE }] }) };
+        }
         if (/^Result/.test(last)) {
-          const flaws = seen.audit === 1 ? [{ id: "full_rooms", severity: "medium", title: "rooms often full", evidence: "x", rule: AUDIT_RULE }, null]
+          const first = brokenRuleFirst ? AUDIT_RULE_BROKEN : AUDIT_RULE;
+          const flaws = seen.audit === 1 ? [{ id: "full_rooms", severity: "medium", title: "rooms often full", evidence: "x", rule: first }, null]
             : [{ id: "big_groups", severity: "low", title: "groups are large", evidence: "y", rule: LOW_RULE }];
           return { text: JSON.stringify({ action: "report", flaws }) };
         }

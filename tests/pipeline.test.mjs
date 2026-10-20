@@ -72,6 +72,18 @@ test("the pipeline runs end to end and its package rebuilds and verifies outside
   assert.throws(() => execFileSync("python", [join(dir, "generate.py"), "--seed", String(seed), "--out", join(dir, "rebuilt2.sqlite")], { stdio: "pipe" }), /differs from database\.sqlite/);
 });
 
+test("regression: a serious finding whose rule is broken gets one correction instead of being lost", async () => {
+  // live run 2026-10-20: a rule raised on an empty database, the finding was rejected and the audit stopped
+  const llm = scriptedModel({ brokenRuleFirst: true });
+  const p = new Pipeline({ llm, runtime: rt, runId: "test-run-3", settings: { auditRounds: 2 } });
+  const state = await p.run("A small venue with meeting rooms and bookings of groups that fit the rooms.");
+  assert.equal(llm.seen.corrections, 1);
+  assert.deepEqual(state.rounds[0].accepted, ["full_rooms"]);
+  assert.match(state.rounds[0].flaws[0].reason, /after a correction; first: .*raises on an empty database/);
+  assert.equal(state.rounds[0].flaws[0].severity, "medium"); // the correction cannot change the severity
+  assert.ok(state.rules.some((r) => r.id === "rarely_full"));
+});
+
 test("regression: an auditor that never reports leaves the round marked incomplete, not clean", async () => {
   // root cause: a missing report was read as an empty one ("no serious flaw found: done")
   const llm = scriptedModel({ auditorNeverReports: true });

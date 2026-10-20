@@ -559,9 +559,33 @@ export class Pipeline {
     }
     const serious = (f) => f.severity === "high" || f.severity === "medium";
     const checked = [];
-    for (const f of flaws) {
-      const verdict = await this.checkFinding(f, dbs);
-      checked.push(verdict.ok ? { ...f, rule: verdict.rule, reason: verdict.reason, ok: true } : { ...f, reason: verdict.reason, ok: false });
+    const verdictOf = async (f, note = "") => {
+      const v = await this.checkFinding(f, dbs);
+      return v.ok ? { ...f, rule: v.rule, reason: v.reason + note, ok: true } : { ...f, reason: v.reason + note, ok: false };
+    };
+    for (const f of flaws) checked.push(await verdictOf(f));
+    // a serious finding whose rule was rejected gets one correction: the reasons go back to the auditor, which sends
+    // a fixed rule or drops the finding (live run 2026-10-20: a real flaw was lost to a rule that raised on an empty
+    // database, and the audit then stopped as if no serious flaw were left)
+    const fixable = checked.filter((f) => !f.ok && f.rule && serious(f));
+    if (fixable.length) {
+      const prompt = `Some findings were rejected by the checks:\n${fixable.map((f) => `- ${f.id}: ${f.reason}`).join("\n")}\n\n` +
+        "For each: if the flaw is real, send it again with a corrected rule (it must run on an empty database without raising, " +
+        "define only its own verify_<id> plus helpers with rule-specific names, and FAIL on the current data); if the check " +
+        'showed that the data does not have the flaw, leave it out. Answer with {"action": "report", "flaws": [...]} holding only the corrected findings.';
+      let again = [];
+      try {
+        const answer = await this.ask(AUDIT_SYSTEM, prompt, 16000, history);
+        history.push({ role: "user", content: prompt }, { role: "assistant", content: answer });
+        const act = extractJson(answer);
+        again = (Array.isArray(act.flaws) ? act.flaws : []).filter(isObj);
+      } catch (e) {
+        if (e instanceof PipelineError) throw e;
+      }
+      for (const g of again) {
+        const i = checked.findIndex((f) => !f.ok && f.id === g.id);
+        if (i >= 0) checked[i] = await verdictOf({ ...g, severity: checked[i].severity }, ` (after a correction; first: ${checked[i].reason})`);
+      }
     }
     const accepted = checked.filter((f) => f.ok);
     const rejected = checked.filter((f) => !f.ok);

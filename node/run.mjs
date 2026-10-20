@@ -45,9 +45,12 @@ const checkRuntime = nodeRuntime({ hashSeed: 1 }); // rebuilds each stage under 
 const pipe = new Pipeline({ llm, runtime, checkRuntime, runId: opt("run-id", `cli-${Date.now()}`),
   settings: { auditRounds: Number(opt("rounds", 3)), maxCalls: Number(opt("max-calls", 150)) },
   emit: (e) => {
-    if (e.type === "step" && e.status !== "running") console.log(`${stamp()} [${e.phase}] ${e.status.toUpperCase()} ${e.title}${e.detail ? ` -- ${String(e.detail).split("\n")[0].slice(0, 220)}` : ""}`);
-    else if (e.type === "step") console.log(`${stamp()} [${e.phase}] ... ${e.title}`);
+    if (e.type !== "step") return;
+    if (e.status !== "running") console.log(`${stamp()} [${e.phase}] ${e.status.toUpperCase()} ${e.title}${e.detail ? ` -- ${String(e.detail).split("\n")[0].slice(0, 220)}` : ""}`);
+    else if (!started.has(e.id)) { started.add(e.id); console.log(`${stamp()} [${e.phase}] ... ${e.title}`); }
+    else if (e.detail) console.log(`${stamp()} [${e.phase}]     ${String(e.detail).split("\n")[0].slice(0, 160)}`); // progress: attempt n, audit turns
   } });
+const started = new Set();
 
 function write(state) {
   for (const [name, content] of Object.entries(packageFiles(state, { provider, model: opt("model") }))) {
