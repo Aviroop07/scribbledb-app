@@ -149,7 +149,9 @@ const TABS = {
     `<button data-schema="sql" class="${schemaView === "sql" ? "active" : ""}">SQL</button>` +
     `<button data-schema="er" class="${schemaView === "er" ? "active" : ""}">ER diagram</button></div></div>` +
     (schemaView === "sql" ? code(s.schema, "schema") :
-      `<div class="er" id="erBox"><p class="muted">Drawing the diagram...</p></div><div class="actions"><button id="erSvg" disabled>Download SVG</button></div>`) +
+      // the cached drawing goes in directly, so the re-render on every pipeline event does not flash the placeholder
+      `<div class="er" id="erBox">${erCache.src && erCache.src === erDiagram(s.tables || []) ? erCache.svg : '<p class="muted">Drawing the diagram...</p>'}</div>` +
+      '<div class="actions"><button id="erSvg" disabled>Download SVG</button></div>') +
     `<h3>Triggers</h3>${s.triggers ? code(s.triggers, "triggers") : '<p class="muted">None.</p>'}` +
     `<h3>Rules <span class="muted">(${s.rules.length})</span></h3>` +
     scroll(`<table class="rules"><tr><th>rule</th><th>statement</th><th>origin</th></tr>${s.rules.map((r) =>
