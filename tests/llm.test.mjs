@@ -178,6 +178,24 @@ test("Anthropic: a paused server-tool turn is continued and its text joined", as
   assert.equal(f.calls[1].body.messages[1].role, "assistant");
 });
 
+test("regression: a request that never answers is abandoned at its time limit and retried", async () => {
+  // root cause: fetch had no time limit, so a stalled connection hung the command-line runner forever
+  let n = 0;
+  const fetch = (url, init) => {
+    if (++n === 1) return new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(new Error("aborted"))));
+    return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({ output_text: "late but fine" }) });
+  };
+  const llm = createLLM({ provider: "openai", model: "m", apiKey: "k", effort: "none", fetch, requestTimeoutMs: 50 });
+  assert.equal((await llm.complete({ messages: [{ role: "user", content: "u" }] })).text, "late but fine");
+  assert.equal(n, 2);
+  // the user's Stop still ends it at once
+  const stop = new AbortController();
+  const hang = (url, init) => new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(new Error("aborted"))));
+  const l2 = createLLM({ provider: "openai", model: "m", apiKey: "k", effort: "none", fetch: hang });
+  setTimeout(() => stop.abort(), 20);
+  await assert.rejects(l2.complete({ messages: [{ role: "user", content: "u" }] }, stop.signal), /aborted/);
+});
+
 test("Responses: reasoning items are not taken for the answer", async () => {
   const f = fake(() => [200, { status: "completed", output: [{ type: "reasoning", content: [{ type: "reasoning_text", text: "THINKING" }] },
     { type: "message", content: [{ type: "output_text", text: "ANSWER" }] }] }]);

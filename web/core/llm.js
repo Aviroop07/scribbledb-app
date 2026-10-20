@@ -39,21 +39,33 @@ export const isFatal = (e) => e instanceof LLMError && (e.status === 401 || e.st
   (e.status === 429 && FATAL_429.test(e.body || "")));
 
 const ATTEMPTS = 4;
-async function post(url, headers, body, { fetchImpl, signal }) {
+// a request that gets no complete answer in this time is abandoned and retried: a stalled connection must not hang a
+// run (the browser has a Stop button; the command-line runner has nothing else). Long reasoning calls took ~3 min.
+export const REQUEST_TIMEOUT_MS = 8 * 60 * 1000;
+
+async function post(url, headers, body, { fetchImpl, signal, timeoutMs = REQUEST_TIMEOUT_MS }) {
   let last;
   for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
     const final = attempt === ATTEMPTS - 1;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), timeoutMs);
+    const relay = () => ctl.abort();
+    if (signal) signal.addEventListener("abort", relay, { once: true });
     let res;
+    let text;
     try {
       res = await fetchImpl(url, { method: "POST", headers: { "content-type": "application/json", ...headers },
-        body: JSON.stringify(body), signal });
+        body: JSON.stringify(body), signal: ctl.signal });
+      text = await res.text();
     } catch (e) {
       if (signal && signal.aborted) throw e;
-      last = new LLMError(`network error: ${e.message}`, 0, "");
+      last = new LLMError(ctl.signal.aborted ? `no answer within ${Math.round(timeoutMs / 1000)} s` : `network error: ${e.message}`, 0, "");
       if (!final) await sleep(1500 * 2 ** attempt);
       continue;
+    } finally {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener("abort", relay);
     }
-    const text = await res.text();
     if (res.ok) {
       try { return JSON.parse(text); } catch { throw new LLMError(`the provider answered with non-JSON: ${text.slice(0, 300)}`, res.status, text); }
     }
@@ -82,6 +94,7 @@ export function createLLM(cfg) {
   const { provider, model, apiKey } = cfg;
   const fetchImpl = cfg.fetch || globalThis.fetch.bind(globalThis);
   const log = cfg.log || (() => {});
+  const timeoutMs = cfg.requestTimeoutMs || REQUEST_TIMEOUT_MS;
   let effort = cfg.effort || "medium";
   let tokenCap = Infinity;
   const base = (cfg.baseUrl || PROVIDERS[provider]?.base || "").replace(/\/$/, "");
@@ -110,7 +123,7 @@ export function createLLM(cfg) {
     if (req.system) body.instructions = req.system;
     if (eff !== "none") body.reasoning = { effort: eff };
     if (search) body.tools = [{ type: "web_search" }];
-    const data = await post(`${base}/responses`, { authorization: `Bearer ${apiKey}` }, body, { fetchImpl, signal });
+    const data = await post(`${base}/responses`, { authorization: `Bearer ${apiKey}` }, body, { fetchImpl, signal, timeoutMs });
     add(data.usage?.input_tokens, data.usage?.output_tokens);
     // the answer is the message items' output_text parts (reasoning and tool-call items are skipped)
     const text = (data.output || []).filter((o) => o.type === "message")
@@ -130,12 +143,12 @@ export function createLLM(cfg) {
     if (provider === "openrouter") { headers["HTTP-Referer"] = "https://github.com/Aviroop07/scribbledb-app"; headers["X-Title"] = "ScribbleDB"; }
     let data;
     try {
-      data = await post(`${base}/chat/completions`, headers, body, { fetchImpl, signal });
+      data = await post(`${base}/chat/completions`, headers, body, { fetchImpl, signal, timeoutMs });
     } catch (e) {
       // some compatible servers only know max_tokens
       if (e instanceof LLMError && e.status === 400 && /max_completion_tokens/i.test(e.body || "") && !rejectsTokenLimit(e)) {
         delete body.max_completion_tokens; body.max_tokens = req.maxTokens;
-        data = await post(`${base}/chat/completions`, headers, body, { fetchImpl, signal });
+        data = await post(`${base}/chat/completions`, headers, body, { fetchImpl, signal, timeoutMs });
       } else throw e;
     }
     add(data.usage?.prompt_tokens, data.usage?.completion_tokens);
@@ -153,7 +166,7 @@ export function createLLM(cfg) {
     let text = "";
     // a long server-tool turn (web search) may pause: send the partial turn back and let the model continue
     for (let turn = 0; turn < 5; turn++) {
-      const data = await post(`${base}/messages`, headers, body, { fetchImpl, signal });
+      const data = await post(`${base}/messages`, headers, body, { fetchImpl, signal, timeoutMs });
       add(data.usage?.input_tokens, data.usage?.output_tokens);
       text += (data.content || []).filter((c) => c.type === "text").map((c) => c.text).join("");
       if (data.stop_reason !== "pause_turn") return { text, truncated: data.stop_reason === "max_tokens" ? "max_tokens" : "" };
@@ -170,7 +183,7 @@ export function createLLM(cfg) {
     if (fit.budget) body.generationConfig.thinkingConfig = { thinkingBudget: fit.budget };
     if (search) body.tools = [{ google_search: {} }];
     const url = `${base}/models/${encodeURIComponent(model)}:generateContent`;
-    const data = await post(url, { "x-goog-api-key": apiKey }, body, { fetchImpl, signal });
+    const data = await post(url, { "x-goog-api-key": apiKey }, body, { fetchImpl, signal, timeoutMs });
     add(data.usageMetadata?.promptTokenCount, data.usageMetadata?.candidatesTokenCount);
     const cand = data.candidates?.[0] || {};
     const text = (cand.content?.parts || []).filter((p) => !p.thought).map((p) => p.text || "").join("");
