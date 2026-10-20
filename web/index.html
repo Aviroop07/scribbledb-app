@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ScribbleDB</title>
+  <meta name="description" content="Describe a database in plain words; get a verified SQLite database, its generator, its rules and its DDL.">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <meta name="theme-color" content="#1f6f5c">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>ScribbleDB</h1>
+  <p class="tag">Describe a database in plain words. An agentic pipeline writes the schema and rules, plans and codes a
+    generator, checks every rule, audits the data for realism, revises the rules and hands you a verified package.
+    Everything runs in your browser with your own model key.</p>
+</header>
+
+<main>
+  <section class="card" id="settings">
+    <h2>Model</h2>
+    <div class="grid">
+      <label>Provider
+        <select id="provider"></select>
+      </label>
+      <label>Model name
+        <input id="model" autocomplete="off" spellcheck="false">
+      </label>
+      <label id="baseUrlRow" hidden>Base URL
+        <input id="baseUrl" placeholder="https://api.example.com/v1" spellcheck="false">
+      </label>
+      <label>API key
+        <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="kept in this browser only">
+      </label>
+      <label>Reasoning effort
+        <select id="effort">
+          <option value="none">none</option><option value="low">low</option>
+          <option value="medium" selected>medium</option><option value="high">high</option>
+        </select>
+      </label>
+      <label>Audit rounds
+        <input id="rounds" type="number" min="0" max="6" value="3">
+      </label>
+      <label>Model-call budget
+        <input id="maxCalls" type="number" min="10" max="1000" value="150">
+      </label>
+      <label class="check"><input id="remember" type="checkbox"> remember the key on this device</label>
+    </div>
+    <p class="note">The key goes from this page straight to your provider; there is no server of ours. If a setting is not
+      supported by the model (for example reasoning effort), the pipeline drops it and says so in the timeline.</p>
+  </section>
+
+  <section class="card">
+    <h2>Describe the database</h2>
+    <textarea id="description" rows="7" placeholder="What is the database about? Which entities, how many rows, which rules and patterns should the data follow?"></textarea>
+    <div class="examples" id="examples"></div>
+    <div class="actions">
+      <button id="run" class="primary">Generate</button>
+      <button id="stop" hidden>Stop</button>
+      <span id="usage" class="muted"></span>
+    </div>
+    <p id="error" class="error" hidden></p>
+  </section>
+
+  <section class="card" id="timelineCard" hidden>
+    <h2>What the pipeline is doing</h2>
+    <ol id="timeline"></ol>
+  </section>
+
+  <section class="card" id="resultCard" hidden>
+    <h2>Result</h2>
+    <div class="downloads">
+      <button id="dlZip" class="primary" disabled>Download the package (.zip)</button>
+      <button id="dlDb" disabled>Download database.sqlite</button>
+    </div>
+    <nav class="tabs" id="tabs"></nav>
+    <div id="tabBody"></div>
+  </section>
+</main>
+
+<footer>
+  <p class="muted">Generates SQLite databases of moderate size (up to a few hundred thousand rows). Large problems that cannot be split
+    into smaller pieces are outside what it is built for. <a href="https://github.com/Aviroop07/scribbledb">Source</a></p>
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>

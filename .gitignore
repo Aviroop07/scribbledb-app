@@ -1,0 +1,8 @@
+node_modules/
+out/
+experiments/
+.logs/
+.env
+.env.*
+*.sqlite
+node/run-live.ps1
