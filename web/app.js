@@ -74,10 +74,11 @@ function browserRuntime(hashSeed) {
 // -- the timeline -----------------------------------------------------------------------------------------------
 
 // A small, safe Markdown subset for model prose (research notes): the text is escaped first, then **bold**, `code`,
-// [links](http...), "- " lists, "#" headings and paragraphs are rendered. Nothing from the model becomes raw HTML.
+// *italic*, [links](http...), "- " lists, "#" headings and paragraphs are rendered. Nothing from the model becomes raw HTML.
 function md(text) {
   const inline = (s) => esc(s)
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^\w*])\*([^*\s][^*]*?)\*(?![\w*])/g, "$1<em>$2</em>") // *italic*, not a "* " bullet or a lone star
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
   const out = [];
@@ -171,7 +172,7 @@ const TABS = {
     if (!r.flaws.length) return head + '<p class="note">No flaw found.</p>';
     return head + scroll(`<table class="audit"><tr><th>finding</th><th>severity</th><th>evidence</th><th>outcome</th></tr>${r.flaws.map((f) =>
       `<tr><td>${esc(f.title || f.id)}</td><td>${pill(String(f.severity || "").toLowerCase(), f.severity || "?")}</td><td class="muted">${esc(f.evidence)}</td>` +
-      `<td>${esc(f.outcome)}</td></tr>`).join("")}</table>`);
+      `<td class="outcome">${esc(f.outcome).replace(/_/g, "_<wbr>")}</td></tr>`).join("")}</table>`); // long rule ids wrap at "_"
   }).join("") : '<p class="note">No audit round ran.</p>',
   Verification: (s) => {
     const seeds = Object.keys(s.verification);

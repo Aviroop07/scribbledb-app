@@ -108,7 +108,7 @@ table.rules td:last-child { min-width: 140px; }
 /* fixed columns, so every audit round's table lines up with the others */
 table.audit { table-layout: fixed; min-width: 640px; }
 table.audit th:nth-child(1) { width: 24%; } table.audit th:nth-child(2) { width: 92px; } table.audit th:nth-child(3) { width: 40%; }
-table.audit td { overflow-wrap: anywhere; }
+table.audit td { overflow-wrap: break-word; }
 table.verify td { min-width: 180px; }
 table.verify td:first-child { min-width: 0; }
 td .muted { margin-top: 2px; }
