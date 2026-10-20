@@ -13,7 +13,7 @@
 <body>
 <header>
   <h1>ScribbleDB</h1>
-  <p class="tag">Describe a database in plain words. An agentic pipeline writes the schema and rules, plans and codes a
+  <p class="tag" id="tagline">Describe a database in plain words. An agentic pipeline writes the schema and rules, plans and codes a
     generator, checks every rule, audits the data for realism, revises the rules and hands you a verified package.
     Everything runs in your browser with your own model key.</p>
 </header>
@@ -54,6 +54,7 @@
 
   <section class="card">
     <h2>Describe the database</h2>
+    <p id="localNote" class="note" hidden></p>
     <textarea id="description" rows="7" placeholder="What is the database about? Which entities, how many rows, which rules and patterns should the data follow?"></textarea>
     <div class="examples" id="examples"></div>
     <div class="actions">

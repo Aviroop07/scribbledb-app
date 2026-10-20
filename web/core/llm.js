@@ -103,7 +103,8 @@ export function createLLM(cfg) {
   let searchMode = "native"; // native -> wikipedia -> none, degraded on failures
 
   if (!PROVIDERS[provider]) throw new Error(`unknown provider ${provider}`);
-  if (!apiKey && provider !== "compatible") throw new Error("an API key is required");
+  // keyFromProxy: calls go to a local proxy that adds the key itself (node/local.mjs); the page holds none
+  if (!apiKey && provider !== "compatible" && !cfg.keyFromProxy) throw new Error("an API key is required");
   if (!model) throw new Error("a model name is required");
   if (!base) throw new Error("a base URL is required for an OpenAI-compatible provider");
 

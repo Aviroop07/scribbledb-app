@@ -15,6 +15,23 @@ const EXAMPLES = {
   "Online shop": "A small online shop over six months: 150-300 products in categories with prices, 1,000-2,000 customers, 3,000-6,000 orders with one to five order lines each. Most customers order once or twice, a few order often; cheap products sell more units; orders peak in the last weeks.",
 };
 
+// -- local mode -------------------------------------------------------------------------------------------------
+// Served by node/local.mjs, the page finds /local-config.json: the provider, model and limits are set on the machine,
+// the key stays there (calls go through its /proxy/), and the Model card is hidden. On the published site the file
+// does not exist and the page is the normal one.
+let local = null;
+try {
+  const r = await fetch(new URL("local-config.json", location.href), { cache: "no-store" });
+  if (r.ok) local = await r.json();
+} catch { /* not local */ }
+if (local) {
+  $("settings").hidden = true;
+  $("tagline").textContent = $("tagline").textContent.replace("with your own model key", "with the model set up on this machine");
+  $("localNote").hidden = false;
+  $("localNote").textContent = `Local mode: ${local.provider} / ${local.model}, reasoning ${local.effort}, ${local.auditRounds} audit rounds, ` +
+    `up to ${local.maxCalls} model calls. The key is held by the local server.`;
+}
+
 // -- settings ---------------------------------------------------------------------------------------------------
 
 for (const [id, p] of Object.entries(PROVIDERS)) $("provider").append(new Option(p.label, id));
@@ -125,12 +142,20 @@ let runtime = null;
 let checkRuntime = null;
 $("run").onclick = async () => {
   $("error").hidden = true;
-  const provider = $("provider").value;
-  const settings = { provider, model: $("model").value.trim(), apiKey: $("apiKey").value.trim(), baseUrl: $("baseUrl").value.trim(), effort: $("effort").value };
+  const provider = local ? local.provider : $("provider").value;
+  // local mode: the proxy adds the key (keyFromProxy), the page sends none. The base URL field belongs to the
+  // OpenAI-compatible provider only: a value left in it must not redirect the other providers.
+  const settings = local
+    ? { provider, model: local.model, keyFromProxy: true, baseUrl: new URL("proxy", location.href).href, effort: local.effort }
+    : { provider, model: $("model").value.trim(), apiKey: $("apiKey").value.trim(), baseUrl: provider === "compatible" ? $("baseUrl").value.trim() : "", effort: $("effort").value };
+  const limits = local ? { auditRounds: local.auditRounds, maxCalls: local.maxCalls } : { auditRounds: Number($("rounds").value), maxCalls: Number($("maxCalls").value) };
   const description = $("description").value.trim();
-  store.set("sdb.provider", provider); store.set("sdb.model", settings.model); store.set("sdb.baseUrl", settings.baseUrl);
-  store.set("sdb.effort", settings.effort); store.set("sdb.description", description);
-  store.set("sdb.key", $("remember").checked ? settings.apiKey : null);
+  store.set("sdb.description", description);
+  if (!local) {
+    store.set("sdb.provider", provider); store.set("sdb.model", settings.model); store.set("sdb.baseUrl", $("baseUrl").value.trim());
+    store.set("sdb.effort", settings.effort);
+    store.set("sdb.key", $("remember").checked ? settings.apiKey : null);
+  }
   let llm;
   try {
     llm = createLLM({ ...settings, log: (e) => onStep({ id: `f${Date.now()}${Math.random()}`, phase: "fallback", title: e.what, status: "info" }) });
@@ -146,7 +171,7 @@ $("run").onclick = async () => {
   $("run").disabled = true; $("stop").hidden = false;
   const pipe = new Pipeline({
     llm, runtime, checkRuntime, signal: controller.signal, runId: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
-    settings: { auditRounds: Number($("rounds").value), maxCalls: Number($("maxCalls").value) },
+    settings: limits,
     emit: (e) => {
       if (e.type === "step") onStep(e);
       if (e.type === "usage") $("usage").textContent = `${e.usage.calls} model calls · ${e.usage.input.toLocaleString()} in / ${e.usage.output.toLocaleString()} out tokens`;
@@ -178,7 +203,7 @@ $("stop").onclick = () => {
   runtime = null; checkRuntime = null;
 };
 $("dlZip").onclick = async () => {
-  const zip = await packageZip(window.JSZip, current, { provider: $("provider").value, model: $("model").value });
+  const zip = await packageZip(window.JSZip, current, local ? { provider: local.provider, model: local.model } : { provider: $("provider").value, model: $("model").value });
   download(await zip.generateAsync({ type: "blob" }), "scribbledb-package.zip");
 };
 $("dlDb").onclick = () => {
