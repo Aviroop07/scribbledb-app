@@ -6,3 +6,4 @@ experiments/
 .env.*
 *.sqlite
 node/run-live.ps1
+__pycache__/
