@@ -15,7 +15,7 @@
 //   package    the database, the generator, the verifiers, the DDL, the verification report, the lineage
 
 import { AUDIT_SYSTEM, CODE_SYSTEM, PLAN_SYSTEM, REPAIR_SYSTEM, RESEARCH_SYSTEM, SPEC_FIX, SPEC_SYSTEM } from "./prompts.js";
-import { extractJson, extractPython } from "./llm.js";
+import { extractJson, extractPython, isFatal, LLMError } from "./llm.js";
 
 export const DEFAULTS = {
   specAttempts: 4,
@@ -128,10 +128,27 @@ export class Pipeline {
     if (this.llm.usage.calls >= this.s.maxCalls) throw new PipelineError(`the model-call budget (${this.s.maxCalls}) is used up`, this.state);
   }
 
+  // A provider error that no retry fixes (bad key, no credits, a rejected request or an unknown model) ends the run
+  // with the partial state; the attempt loops below would otherwise read it as a bad answer and spend every attempt on
+  // it (and the plan step would quietly fall back to the default plan). Errors that may pass (429 rate limit, 5xx,
+  // network) were already retried by the provider layer and stay ordinary attempt failures.
+  providerError(e) {
+    if (e instanceof PipelineError) return e;
+    if (this.signal && this.signal.aborted) return new PipelineError("stopped by the user", this.state);
+    if (isFatal(e) || (e instanceof LLMError && (e.status === 400 || e.status === 404)))
+      return new PipelineError(`the model provider refused the request: ${e.message}`, this.state);
+    return e;
+  }
+
   async ask(system, user, maxTokens = 16000, history = []) {
     this.checkBudget();
     const messages = [...history, { role: "user", content: user }];
-    const { text } = await this.llm.complete({ system, messages, maxTokens }, this.signal);
+    let text;
+    try {
+      ({ text } = await this.llm.complete({ system, messages, maxTokens }, this.signal));
+    } catch (e) {
+      throw this.providerError(e);
+    }
     this.emit({ type: "usage", usage: { ...this.llm.usage } });
     return text;
   }
@@ -163,7 +180,8 @@ export class Pipeline {
         RESEARCH_SYSTEM, this.signal);
       this.state.research = r;
       st.done(`${r.source}\n\n${r.text}`);
-    } catch (e) {
+    } catch (err) {
+      const e = this.providerError(err);
       if (e instanceof PipelineError) throw e;
       this.state.research = { text: "", source: "none" };
       st.info(`research skipped: ${e.message}`);

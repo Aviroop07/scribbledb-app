@@ -25,6 +25,13 @@ export class LLMError extends Error {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// An error no retry or fallback can fix: a bad key (401), no access (403), or an account without credits (a 429 whose
+// body says quota/credits/billing - OpenAI sends insufficient_quota as 429). Retrying it wastes the user's time and
+// treating it as "search unavailable" hides it (live run 2026-10-20: 30 s of retries, then a silent search fallback).
+const FATAL_429 = /insufficient_quota|quota|credit|billing|exceeded your current/i;
+export const isFatal = (e) => e instanceof LLMError && (e.status === 401 || e.status === 403 ||
+  (e.status === 429 && FATAL_429.test(e.body || "")));
+
 async function post(url, headers, body, { fetchImpl, signal }) {
   let last;
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -43,6 +50,7 @@ async function post(url, headers, body, { fetchImpl, signal }) {
       try { return JSON.parse(text); } catch { throw new LLMError(`the provider answered with non-JSON: ${text.slice(0, 300)}`, res.status, text); }
     }
     last = new LLMError(`HTTP ${res.status}: ${text.slice(0, 600)}`, res.status, text);
+    if (isFatal(last)) throw last;
     if (res.status === 429 || res.status >= 500) { await sleep(2000 * 2 ** attempt); continue; }
     throw last;
   }
@@ -111,7 +119,7 @@ export function createLLM(cfg) {
     }
     body.max_completion_tokens = req.maxTokens || 16000;
     const headers = apiKey ? { authorization: `Bearer ${apiKey}` } : {};
-    if (provider === "openrouter") { headers["HTTP-Referer"] = "https://github.com/Aviroop07/scribbledb"; headers["X-Title"] = "ScribbleDB"; }
+    if (provider === "openrouter") { headers["HTTP-Referer"] = "https://github.com/Aviroop07/scribbledb-app"; headers["X-Title"] = "ScribbleDB"; }
     let data;
     try {
       data = await post(`${base}/chat/completions`, headers, body, { fetchImpl, signal });
@@ -186,7 +194,7 @@ export function createLLM(cfg) {
         const text = await once({ system, messages: [{ role: "user", content: question }], maxTokens: 8000 }, signal, true);
         return { text, source: `${PROVIDERS[provider].label} web search` };
       } catch (e) {
-        if (signal && signal.aborted) throw e;
+        if ((signal && signal.aborted) || isFatal(e)) throw e;
         log({ kind: "fallback", what: `built-in web search failed (${String(e.message).slice(0, 160)}); using Wikipedia search` });
         searchMode = "wikipedia";
       }

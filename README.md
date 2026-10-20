@@ -7,7 +7,7 @@ Describe a database in plain words. An agentic pipeline turns the description in
 - `generator/` and `generate.py`: the code that rebuilds the database from a seed, row for row
 - `verifiers.py` and `verify.py`: one check per rule, all passing on the shipped databases
 
-**Use it:** https://aviroop07.github.io/scribbledb/ (any browser, on desktop or Android; "Install" from the browser
+**Use it:** https://aviroop07.github.io/scribbledb-app/ (any browser, on desktop or Android; "Install" from the browser
 menu gives an offline app). You need an API key from a model provider. Nothing else: no Python, no Docker, no server
 of ours. The key goes from your browser straight to the provider.
 

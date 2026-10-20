@@ -3,7 +3,7 @@
 //        (--description "..." | --description-file f.txt) [--out out/]
 // The API key comes from the environment: SCRIBBLE_API_KEY, else the provider's usual variable (OPENAI_API_KEY,
 // ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY). It is never printed.
-import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, appendFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createLLM } from "../web/core/llm.js";
 import { Pipeline, PipelineError } from "../web/core/pipeline.js";
@@ -23,6 +23,23 @@ const t0 = Date.now();
 const stamp = () => `${((Date.now() - t0) / 1000).toFixed(0).padStart(5)}s`;
 const llm = createLLM({ provider, model: opt("model"), apiKey, baseUrl: opt("base-url", ""), effort: opt("effort", "medium"),
   log: (e) => console.log(`${stamp()} [fallback] ${e.what}`) });
+// every model call, request and response, one JSON line each (out/calls.jsonl), for reading a run call by call
+const callLog = join(out, "calls.jsonl");
+writeFileSync(callLog, "");
+for (const name of ["complete", "research"]) {
+  const inner = llm[name].bind(llm);
+  llm[name] = async (...a) => {
+    const at = Date.now();
+    try {
+      const r = await inner(...a);
+      appendFileSync(callLog, JSON.stringify({ name, seconds: (Date.now() - at) / 1000, request: name === "research" ? { question: a[0], system: a[1] } : a[0], response: r }) + "\n");
+      return r;
+    } catch (e) {
+      appendFileSync(callLog, JSON.stringify({ name, seconds: (Date.now() - at) / 1000, request: a[0], error: String(e.message) }) + "\n");
+      throw e;
+    }
+  };
+}
 const runtime = nodeRuntime();
 const pipe = new Pipeline({ llm, runtime, runId: opt("run-id", `cli-${Date.now()}`),
   settings: { auditRounds: Number(opt("rounds", 3)), maxCalls: Number(opt("max-calls", 150)) },
