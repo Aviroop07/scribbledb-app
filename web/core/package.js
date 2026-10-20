@@ -2,6 +2,7 @@
 // programs (same seeded streams, same write guard as the in-app harness), verify.py runs every rule on a database file.
 
 import { assembleVerifiers } from "./pipeline.js";
+import { erDiagram } from "./er.js";
 
 export const GENERATE_PY = `"""Rebuild the database: python generate.py --seed SEED --out database.sqlite
 Runs the stage programs in generator/ in order on a fresh database with schema.sql and triggers.sql - exactly as the
@@ -143,6 +144,7 @@ export function packageFiles(state, settings = {}) {
   const seeds = Object.keys(state.databases).map(Number).sort((a, b) => a - b);
   files["schema.sql"] = state.schema.trim() + "\n";
   files["triggers.sql"] = (state.triggers || "").trim() + "\n";
+  if (state.tables?.length) files["er_diagram.mmd"] = erDiagram(state.tables);
   files["verifiers.py"] = assembleVerifiers(state.rules);
   const stages = state.stages.map((s, i) => ({ index: i, tables: s.tables, file: `stage_${String(i + 1).padStart(2, "0")}_${slug(s.tables)}.py` }));
   const dbFile = (seed, i) => (i === 0 ? "database.sqlite" : `database_seed_${seed}.sqlite`);
@@ -178,6 +180,7 @@ ${state.description}
 
 - \`database.sqlite\` - the database (seed ${seeds[0]}); ${seeds.length > 1 ? `\`database_seed_${seeds[1]}.sqlite\` a second one from another seed.` : ""}
 - \`schema.sql\`, \`triggers.sql\` - the SQLite DDL: tables, keys, CHECK constraints and triggers.
+- \`er_diagram.mmd\` (and \`er_diagram.svg\` when downloaded from the app) - the schema as an entity-relationship diagram (Mermaid).
 - \`verifiers.py\` - every rule as a function \`verify_<id>(db)\`.
 - \`generator/\` - the generator, one program per stage (${stages.map((s) => s.tables.join("+")).join(" -> ")}).
 - \`generate.py\` - rebuilds the database: \`python generate.py --seed ${seeds[0]} --out rebuilt.sqlite\`.

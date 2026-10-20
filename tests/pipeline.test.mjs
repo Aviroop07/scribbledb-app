@@ -53,6 +53,8 @@ test("the pipeline runs end to end and its package rebuilds and verifies outside
   for (const v of Object.values(state.verification)) for (const [id, r] of Object.entries(v)) assert.ok(r.passed, id);
   assert.ok(events.some((e) => e.type === "finished"));
   // the package, rebuilt and verified with the system Python
+  // the ER diagram source is in the package, with the column-level foreign key the harness read from the schema
+  assert.match(packageFiles(state)["er_diagram.mmd"], /room \|\|--o\{ booking : "room_id"/);
   const dir = mkdtempSync(join(tmpdir(), "sdb-"));
   for (const [name, content] of Object.entries(packageFiles(state))) {
     mkdirSync(dirname(join(dir, name)), { recursive: true });

@@ -71,8 +71,11 @@ def table_info(con: sqlite3.Connection) -> list[dict]:
     for t in tables_of(con):
         cols = [{"name": r[1], "type": r[2], "notnull": bool(r[3]), "pk": bool(r[5])}
                 for r in con.execute(f'PRAGMA table_info("{t}")')]
-        fks = sorted({r[2] for r in con.execute(f'PRAGMA foreign_key_list("{t}")')})
-        out.append({"name": t, "columns": cols, "references": [f for f in fks if f != t]})
+        fk_rows = con.execute(f'PRAGMA foreign_key_list("{t}")').fetchall()
+        fks = sorted({r[2] for r in fk_rows})
+        # column-level foreign keys (for the ER diagram): from this table's column to the referenced table's column
+        links = [{"from": r[3], "table": r[2], "to": r[4]} for r in fk_rows]
+        out.append({"name": t, "columns": cols, "references": [f for f in fks if f != t], "fks": links})
     return out
 
 
