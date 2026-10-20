@@ -86,6 +86,9 @@ To try the UI without a key:
 2. Open http://localhost:8765.
 3. Choose "OpenAI-compatible" with base URL `http://localhost:8766/v1`.
 
+The site is `web/` served by GitHub Pages from the `gh-pages` branch; `npm run deploy` pushes `main` and publishes
+`web/` there.
+
 ## License
 
 MIT

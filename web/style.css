@@ -7,6 +7,7 @@
     --accent-ink: #0d1411; --ok: #5cc27e; --bad: #f08a80; --run: #e3b341; --code: #222a26; }
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; } /* a display rule (label: flex) must not show an element marked hidden */
 body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
 header, main, footer { max-width: 980px; margin: 0 auto; padding: 0 16px; }
 header h1 { margin: 24px 0 4px; font-size: 26px; color: var(--accent); }

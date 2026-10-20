@@ -214,6 +214,7 @@ export class Pipeline {
     const notes = this.state.research?.text ? `\n\nResearch notes:\n${this.state.research.text}` : "";
     const history = [];
     let user = `Database description:\n${this.state.description}${notes}`;
+    let providerFailure = "";
     for (let attempt = 1; attempt <= this.s.specAttempts; attempt++) {
       st.update(`attempt ${attempt}`);
       let answer;
@@ -223,8 +224,10 @@ export class Pipeline {
         // a transient provider failure (already retried) costs this attempt; the same request goes again
         if (e instanceof PipelineError) throw e;
         st.update(`attempt ${attempt}: the provider failed (${e.message})`);
+        providerFailure = e.message;
         continue;
       }
+      providerFailure = "";
       history.push({ role: "user", content: user }, { role: "assistant", content: answer });
       let spec;
       try { spec = extractJson(answer); } catch (e) { user = SPEC_FIX([e.message]); continue; }
@@ -237,8 +240,10 @@ export class Pipeline {
       st.update(`attempt ${attempt}: ${problems.length} problems - ${problems.slice(0, 3).join("; ")}`);
       user = SPEC_FIX(problems.slice(0, 20));
     }
-    st.fail("the specification could not be made valid");
-    throw new PipelineError("the specification could not be made valid", this.state);
+    // when the last attempt failed at the provider, that is the cause to report, not the specification
+    const why = providerFailure ? `the model provider kept failing (${providerFailure})` : "the specification could not be made valid";
+    st.fail(why);
+    throw new PipelineError(why, this.state);
   }
 
   async checkSpecObject(spec) {
