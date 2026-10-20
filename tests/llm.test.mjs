@@ -74,7 +74,9 @@ test("Anthropic and Gemini request shapes", async () => {
   const lg = createLLM({ provider: "gemini", model: "gm", apiKey: "k", effort: "medium", fetch: g.fetch });
   assert.equal((await lg.complete({ system: "S", messages: [{ role: "user", content: "u" }, { role: "assistant", content: "a" }, { role: "user", content: "v" }] })).text, "G");
   const gb = g.calls[0];
-  assert.match(gb.url, /\/models\/gm:generateContent\?key=k$/);
+  assert.match(gb.url, /\/models\/gm:generateContent$/);
+  assert.equal(gb.headers["x-goog-api-key"], "k"); // the key in a header, not in the URL
+  assert.ok(gb.body.generationConfig.maxOutputTokens >= 8192 + 4000); // thinking fits inside the output limit
   assert.deepEqual(gb.body.systemInstruction, { parts: [{ text: "S" }] });
   assert.deepEqual(gb.body.contents.map((c) => c.role), ["user", "model", "user"]);
   assert.deepEqual(gb.body.generationConfig.thinkingConfig, { thinkingBudget: 8192 });
@@ -120,4 +122,65 @@ test("regression: a provider error no retry can fix ends the pipeline instead of
   const p = new Pipeline({ llm, runtime: null, emit: () => {}, runId: "r", settings: { research: true } });
   await assert.rejects(p.run("A description long enough to pass the length check."), (e) => e instanceof PipelineError && /refused/.test(e.message));
   assert.equal(f.calls.length, 1);
+});
+
+test("regression: a rejected search tool does not switch reasoning off for the rest of the run", async () => {
+  // root cause: the reasoning fallback matched any 400 saying "not supported"
+  const f = fake((url, body) => body.tools ? [400, { error: { message: "Hosted tool 'web_search' is not supported with this model." } }] : respOk("ok"));
+  const llm = createLLM({ provider: "openai", model: "m", apiKey: "k", effort: "medium", fetch: f.fetch });
+  await llm.research("What do library loans look like?", "S");
+  assert.equal(llm.effort, "medium");
+  assert.deepEqual(f.calls.at(-1).body.reasoning, { effort: "medium" });
+});
+
+test("regression: after the Chat Completions fallback, research does not claim a web search that never ran", async () => {
+  const f = fake((url) => {
+    if (url.endsWith("/responses")) return [404, { error: { message: "not found" } }];
+    if (url.includes("wikipedia.org/w/api.php")) return [200, { query: { search: [] } }];
+    return chatOk("answer");
+  });
+  const llm = createLLM({ provider: "openai", model: "m", apiKey: "k", effort: "none", fetch: f.fetch });
+  const r = await llm.research("What do library loans look like?", "S");
+  assert.notEqual(r.source, "OpenAI web search");
+  assert.equal(r.source, "model knowledge (no search available)");
+});
+
+test("regression: an answer cut off at the output limit is asked again with a higher limit, then fails loudly", async () => {
+  let n = 0;
+  const f = fake((url, body) => (++n === 1 ? [200, { status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, output: [] }] : respOk(`ok ${body.max_output_tokens}`)));
+  const llm = createLLM({ provider: "openai", model: "m", apiKey: "k", effort: "none", fetch: f.fetch });
+  assert.equal((await llm.complete({ messages: [{ role: "user", content: "u" }], maxTokens: 1000 })).text, "ok 2000");
+  const g = fake(() => [200, { choices: [{ message: { content: "partial" }, finish_reason: "length" }] }]);
+  const l2 = createLLM({ provider: "compatible", model: "m", baseUrl: "http://h/v1", effort: "none", fetch: g.fetch });
+  await assert.rejects(l2.complete({ messages: [{ role: "user", content: "u" }], maxTokens: 1000 }), /cut off/);
+  assert.equal(g.calls.length, 2);
+  const empty = fake(() => respOk(""));
+  const l3 = createLLM({ provider: "openai", model: "m", apiKey: "k", effort: "none", fetch: empty.fetch });
+  await assert.rejects(l3.complete({ messages: [{ role: "user", content: "u" }] }), /empty answer/);
+});
+
+test("regression: a model with a smaller output cap gets a lower limit instead of failing the run", async () => {
+  const f = fake((url, body) => body.max_tokens > 8192 ? [400, { error: { message: "max_tokens: 32000 > 8192, which is the maximum allowed number of output tokens" } }] : [200, { content: [{ type: "text", text: "A" }], stop_reason: "end_turn" }]);
+  const llm = createLLM({ provider: "anthropic", model: "c", apiKey: "k", effort: "none", fetch: f.fetch });
+  assert.equal((await llm.complete({ messages: [{ role: "user", content: "u" }], maxTokens: 32000 })).text, "A");
+  assert.equal(llm.tokenCap, 8192);
+  await llm.complete({ messages: [{ role: "user", content: "u" }], maxTokens: 32000 });
+  assert.equal(f.calls.length, 3);
+});
+
+test("Anthropic: a paused server-tool turn is continued and its text joined", async () => {
+  let n = 0;
+  const f = fake((url, body) => (++n === 1 ? [200, { content: [{ type: "text", text: "part one. " }, { type: "server_tool_use", id: "s", name: "web_search", input: {} }], stop_reason: "pause_turn" }] :
+    [200, { content: [{ type: "text", text: `part two (${body.messages.length} msgs)` }], stop_reason: "end_turn" }]));
+  const llm = createLLM({ provider: "anthropic", model: "c", apiKey: "k", effort: "none", fetch: f.fetch });
+  const r = await llm.research("What do library loans look like?", "S");
+  assert.equal(r.text, "part one. part two (2 msgs)");
+  assert.equal(f.calls[1].body.messages[1].role, "assistant");
+});
+
+test("Responses: reasoning items are not taken for the answer", async () => {
+  const f = fake(() => [200, { status: "completed", output: [{ type: "reasoning", content: [{ type: "reasoning_text", text: "THINKING" }] },
+    { type: "message", content: [{ type: "output_text", text: "ANSWER" }] }] }]);
+  const llm = createLLM({ provider: "openai", model: "m", apiKey: "k", effort: "low", fetch: f.fetch });
+  assert.equal((await llm.complete({ messages: [{ role: "user", content: "u" }] })).text, "ANSWER");
 });

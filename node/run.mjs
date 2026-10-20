@@ -40,8 +40,9 @@ for (const name of ["complete", "research"]) {
     }
   };
 }
-const runtime = nodeRuntime();
-const pipe = new Pipeline({ llm, runtime, runId: opt("run-id", `cli-${Date.now()}`),
+const runtime = nodeRuntime({ hashSeed: 0 });
+const checkRuntime = nodeRuntime({ hashSeed: 1 }); // rebuilds each stage under another string-hash seed
+const pipe = new Pipeline({ llm, runtime, checkRuntime, runId: opt("run-id", `cli-${Date.now()}`),
   settings: { auditRounds: Number(opt("rounds", 3)), maxCalls: Number(opt("max-calls", 150)) },
   emit: (e) => {
     if (e.type === "step" && e.status !== "running") console.log(`${stamp()} [${e.phase}] ${e.status.toUpperCase()} ${e.title}${e.detail ? ` -- ${String(e.detail).split("\n")[0].slice(0, 220)}` : ""}`);
@@ -69,5 +70,6 @@ try {
   console.log(`usage: ${u.calls} calls, ${u.input} input tokens, ${u.output} output tokens`);
   writeFileSync(join(out, "usage.json"), JSON.stringify(u));
   runtime.close();
+  checkRuntime.close();
 }
 process.exit(code);

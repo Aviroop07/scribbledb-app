@@ -5,9 +5,12 @@
 //   research   what real data of this kind looks like (web search when the provider can)
 //   spec       schema, triggers, rules - must load in SQLite; every rule's verifier must run
 //   plan       stages - every table once, foreign keys respected (else a deterministic plan, logged)
-//   code       each stage: every rule of the stage passes on 3 shown seeds AND 2 hidden seeds the coder never sees,
-//              and the stage uses its seed (its tables' rows differ across the shown seeds unless declared FIXED);
-//              a stage that cannot be made to pass gets its rules repaired (loosened) and is tried again
+//   code       each stage: every rule of the stage passes on 3 shown seeds AND 2 hidden seeds (the coder is told a
+//              hidden seed failed and which rule's check said what, never the seed itself), the stage uses its
+//              seed (its tables' rows differ across the shown seeds unless declared FIXED), and its rows are
+//              reproducible: rebuilt in a second runtime with another string-hash seed, they are the same (so the
+//              package's generate.py rebuilds them in any CPython); a stage that cannot be made to pass gets its
+//              rules repaired (loosened) and is tried again
 //   audit      the auditor looks for unrealistic patterns on the hidden-seed databases and proposes rules; a rule
 //              is accepted only if it runs and FAILS on at least one of those databases; accepted rules are
 //              applied and the affected stages regenerated; stop when no high or medium flaw is found, or at the
@@ -35,6 +38,10 @@ export class PipelineError extends Error {
 }
 
 const ID = /^[a-z][a-z0-9_]{1,50}$/;
+// model JSON is untrusted in shape: a list field may come as a string, null or an object
+const strList = (x) => (Array.isArray(x) ? x.filter((v) => v != null).map(String) : typeof x === "string" && x ? [x] : []);
+const isObj = (x) => x != null && typeof x === "object" && !Array.isArray(x);
+const ruleCodes = (rules) => rules.map((r) => [r.id, r.code]);
 const clip = (s, n = 4000) => { s = String(s ?? ""); return s.length <= n ? s : `${s.slice(0, n / 2)}\n...[${s.length - n} chars left out]...\n${s.slice(-n / 2)}`; };
 
 export function hiddenSeeds(runId) {
@@ -100,9 +107,11 @@ export function ruleStage(rule, stages) {
 // -- the pipeline -------------------------------------------------------------------------------------------------
 
 export class Pipeline {
-  constructor({ llm, runtime, emit, settings = {}, signal, runId }) {
+  // checkRuntime: a second runtime started with another PYTHONHASHSEED, for the reproducibility check (omitted: no check)
+  constructor({ llm, runtime, checkRuntime, emit, settings = {}, signal, runId }) {
     this.llm = llm;
     this.rt = runtime;
+    this.rt2 = checkRuntime || null;
     this.emit = emit || (() => {});
     this.s = { ...DEFAULTS, ...settings };
     this.signal = signal;
@@ -153,7 +162,17 @@ export class Pipeline {
     return text;
   }
 
+  // every failure leaves as a PipelineError carrying the partial state (the caller packages what was made)
   async run(description) {
+    try {
+      return await this.runPhases(description);
+    } catch (e) {
+      const pe = this.providerError(e);
+      throw pe instanceof PipelineError ? pe : new PipelineError(`unexpected error: ${e && e.message ? e.message : e}`, this.state);
+    }
+  }
+
+  async runPhases(description) {
     this.state.description = description.trim();
     if (this.state.description.length < 20) throw new PipelineError("the description is too short", this.state);
     this.emit({ type: "start", runId: this.runId, hiddenSeeds: this.hidden.length });
@@ -197,7 +216,15 @@ export class Pipeline {
     let user = `Database description:\n${this.state.description}${notes}`;
     for (let attempt = 1; attempt <= this.s.specAttempts; attempt++) {
       st.update(`attempt ${attempt}`);
-      const answer = await this.ask(SPEC_SYSTEM, user, 32000, history);
+      let answer;
+      try {
+        answer = await this.ask(SPEC_SYSTEM, user, 32000, history);
+      } catch (e) {
+        // a transient provider failure (already retried) costs this attempt; the same request goes again
+        if (e instanceof PipelineError) throw e;
+        st.update(`attempt ${attempt}: the provider failed (${e.message})`);
+        continue;
+      }
       history.push({ role: "user", content: user }, { role: "assistant", content: answer });
       let spec;
       try { spec = extractJson(answer); } catch (e) { user = SPEC_FIX([e.message]); continue; }
@@ -224,15 +251,16 @@ export class Pipeline {
     const ids = new Set();
     const clean = [];
     for (const r of rules) {
+      if (!isObj(r)) { problems.push(`every rule must be an object with id, statement, tables and code (got ${JSON.stringify(r)})`); continue; }
       const id = String(r.id || "");
       if (!ID.test(id)) { problems.push(`rule id ${JSON.stringify(id)} must be snake_case`); continue; }
       if (ids.has(id)) { problems.push(`rule id ${id} is used twice`); continue; }
       ids.add(id);
       if (!String(r.code || "").includes(`def verify_${id}(`)) problems.push(`rule ${id}: its code must define verify_${id}(db)`);
-      clean.push({ id, statement: String(r.statement || id), tables: (r.tables || []).map(String), code: String(r.code || ""), origin: "specification" });
+      clean.push({ id, statement: String(r.statement || id), tables: strList(r.tables), code: String(r.code || ""), origin: "specification" });
     }
     if (problems.length) return problems;
-    const res = (await this.rt.call("check_spec", { schema, triggers, verifiers: assembleVerifiers(clean) })).result;
+    const res = (await this.rt.call("check_spec", { schema, triggers, verifiers: assembleVerifiers(clean), rule_codes: ruleCodes(clean) })).result;
     problems.push(...res.problems);
     const tableNames = new Set(res.tables.map((t) => t.name));
     for (const r of clean) {
@@ -256,17 +284,21 @@ export class Pipeline {
     const history = [];
     let prompt = user;
     for (let attempt = 1; attempt <= this.s.planAttempts; attempt++) {
-      let plan;
+      let answer;
       try {
-        const answer = await this.ask(PLAN_SYSTEM, prompt, 16000, history);
-        history.push({ role: "user", content: prompt }, { role: "assistant", content: answer });
-        plan = extractJson(answer);
+        answer = await this.ask(PLAN_SYSTEM, prompt, 16000, history);
       } catch (e) {
         if (e instanceof PipelineError) throw e;
+        continue; // a transient provider failure: the same prompt goes again (it may be the one with the schema)
+      }
+      history.push({ role: "user", content: prompt }, { role: "assistant", content: answer });
+      let plan;
+      try { plan = extractJson(answer); } catch (e) {
         prompt = `That answer was not usable (${e.message}). Answer with the JSON object only.`;
         continue;
       }
-      const stages = (plan.stages || []).map((s) => ({ tables: (s.tables || []).map(String), notes: String(s.notes || "") }));
+      const stages = (Array.isArray(plan.stages) ? plan.stages : []).filter(isObj).map((s) => ({ tables: strList(s.tables), notes: String(s.notes || "") }));
+      if (!stages.length) { prompt = 'The answer has no "stages" list of {"tables": [...], "notes": "..."} objects. Answer with the corrected JSON object.'; continue; }
       const problems = validatePlan(stages, tables);
       if (!problems.length) return this.setPlan(stages, st, `planned by the model (attempt ${attempt})`);
       prompt = `The plan has problems:\n- ${problems.join("\n- ")}\nAnswer with the corrected JSON object.`;
@@ -296,6 +328,12 @@ export class Pipeline {
     return this.state.stages.slice(0, k + 1).map((s, i) => ({ index: i, tables: s.tables, code: i === k ? code : this.state.codes[i] }));
   }
 
+  // the source of every stage a build of stage k runs: the worker loads the packages they import (a fresh worker,
+  // after a time-limit kill, has none loaded)
+  allCode(k, code) {
+    return this.stagesFor(k, code).map((s) => s.code).join("\n");
+  }
+
   // one candidate program for stage k on some seeds: {ok, feedback, results}
   async evaluate(k, code, seeds, hidden) {
     const stage = this.state.stages[k];
@@ -310,7 +348,7 @@ export class Pipeline {
       let built;
       try {
         built = await this.rt.call("build", { schema: this.state.schema, triggers: this.state.triggers, stages: this.stagesFor(k, code), seed },
-          { wantDb: true, code, timeoutMs: this.s.stageTimeoutMs });
+          { wantDb: true, code: this.allCode(k, code), timeoutMs: this.s.stageTimeoutMs });
       } catch (e) {
         return { ok: false, feedback: `On ${name}: the program did not finish (${e.message}). Make it faster: no long rejection loops, no per-row queries in loops.` };
       }
@@ -332,10 +370,36 @@ export class Pipeline {
       }
     }
     const unused = hidden ? [] : Object.entries(digests).filter(([t, ds]) => ds.length > 1 && new Set(ds).size === 1 && !(t in fixed)).map(([t]) => t);
-    if (!fails.length && !unused.length) return { ok: true, seconds, fixed };
+    const first = Object.fromEntries(Object.entries(digests).map(([t, ds]) => [t, ds[0]]));
+    if (!fails.length && !unused.length) return { ok: true, seconds, fixed, first };
     const lines = fails.map((f) => `- ${f.seed}: rule ${f.rule} fails: ${f.detail}`);
     if (unused.length) lines.push(`- the seed does not change table(s) ${unused.join(", ")}: every shown seed gave the same rows - draw them from rng (or, only if the rules fully fix the content, declare FIXED)`);
     return { ok: false, fails, unused, feedback: lines.slice(0, 30).join("\n") };
+  }
+
+  // The stage rebuilt on the first shown seed in the second runtime (another string-hash seed): the same rows, or
+  // the program depends on something besides rng - set/dict order of strings (which also differs between this
+  // WebAssembly Python and a native one), the clock, os/uuid randomness, numpy's default_rng() without a seed, SQL
+  // random(). Such a program could not be rebuilt by the package's generate.py.
+  async reproducible(k, code, firstDigests) {
+    if (!this.rt2) return { ok: true };
+    const seed = this.s.shownSeeds[0];
+    let built;
+    try {
+      built = await this.rt2.call("build", { schema: this.state.schema, triggers: this.state.triggers, stages: this.stagesFor(k, code), seed },
+        { code: this.allCode(k, code), timeoutMs: this.s.stageTimeoutMs });
+    } catch (e) {
+      return { ok: false, feedback: `Rebuilt on seed ${seed}, the program did not finish (${e.message}).` };
+    }
+    const rec = built.result.stages[k];
+    if (!built.result.ok || !rec) {
+      return { ok: false, feedback: `Rebuilt on seed ${seed} in a fresh Python, the program failed:\n${(built.result.stages.find((s) => !s.ok) || {}).error || "unknown error"}` };
+    }
+    const differ = Object.keys(firstDigests || {}).filter((t) => rec.table_digests[t] !== firstDigests[t]);
+    if (!differ.length) return { ok: true };
+    return { ok: false, feedback: `Built twice from seed ${seed}, the program gave different rows in ${differ.join(", ")}: its output depends on something ` +
+      "besides rng - the iteration order of a set (or of a dict built from one) of strings, the clock, os/uuid randomness, numpy's default_rng() " +
+      "without a seed, or SQL random(). Sort sets before iterating them and draw every random choice from rng." };
   }
 
   codePrompt(k, previous, feedback) {
@@ -383,6 +447,10 @@ export class Pipeline {
           result = hid.ok ? ev : { ...hid, feedback: `It passed the shown seeds but not the unseen ones:\n${hid.feedback}` };
         }
         if (result.ok) {
+          const rep = await this.reproducible(k, code, ev.first);
+          if (!rep.ok) result = rep;
+        }
+        if (result.ok) {
           this.state.codes[k] = code;
           this.state.fixed[k] = result.fixed || {};
           const fixedNote = Object.keys(result.fixed || {}).length ? `; declared fixed: ${Object.keys(result.fixed).join(", ")}` : "";
@@ -415,14 +483,15 @@ export class Pipeline {
       st.info(`no usable repair (${e.message}); retrying the stage as it is`);
       return;
     }
-    const edits = (answer.rules || []).filter((r) => r.op === "edit" && ids.includes(r.id) && String(r.code || "").includes(`def verify_${r.id}(`));
+    const edits = (Array.isArray(answer.rules) ? answer.rules : []).filter((r) => isObj(r) && r.op === "edit" && ids.includes(r.id) && String(r.code || "").includes(`def verify_${r.id}(`));
     if (!edits.length) { st.info(`rules kept as they are: ${answer.reason || ""}`); return; }
+    const tablesOf = (e, r) => (strList(e.tables).length ? strList(e.tables) : r.tables);
     const next = this.state.rules.map((r) => {
       const e = edits.find((x) => x.id === r.id);
-      return e ? { ...r, statement: String(e.statement || r.statement), tables: (e.tables || r.tables).map(String), code: String(e.code), origin: `${r.origin}; loosened at stage ${k + 1}` } : r;
+      return e ? { ...r, statement: String(e.statement || r.statement), tables: tablesOf(e, r), code: String(e.code), origin: `${r.origin}; loosened at stage ${k + 1}` } : r;
     });
-    const res = (await this.rt.call("check_spec", { schema: this.state.schema, triggers: this.state.triggers, verifiers: assembleVerifiers(next) })).result;
-    const badTables = edits.filter((e) => ruleStage({ tables: (e.tables || []).map(String) }, this.state.stages) < 0);
+    const res = (await this.rt.call("check_spec", { schema: this.state.schema, triggers: this.state.triggers, verifiers: assembleVerifiers(next), rule_codes: ruleCodes(next) })).result;
+    const badTables = next.filter((r) => edits.some((e) => e.id === r.id) && ruleStage(r, this.state.stages) < 0);
     if (!res.ok || badTables.length) { st.info(`the repair was invalid (${[...res.problems, ...badTables.map((b) => `${b.id}: unknown tables`)].slice(0, 3).join("; ")}); rules kept`); return; }
     this.state.rules = next;
     st.done(`revised ${edits.map((e) => e.id).join(", ")}: ${answer.reason || ""}`);
@@ -467,7 +536,7 @@ export class Pipeline {
       history.push({ role: "user", content: prompt }, { role: "assistant", content: answer });
       let act;
       try { act = extractJson(answer); } catch (e) { user = `That was not a JSON action (${e.message}). Answer with one JSON object.`; continue; }
-      if (act.action === "report") { flaws = Array.isArray(act.flaws) ? act.flaws : []; break; }
+      if (act.action === "report") { flaws = (Array.isArray(act.flaws) ? act.flaws : []).filter(isObj); break; }
       if (act.action === "query") {
         const seed = seedNames.includes(Number(act.seed)) ? Number(act.seed) : seedNames[0];
         const q = (await this.rt.call("query", { sql: String(act.sql || "") }, { db: dbs[seed] })).result;
@@ -482,53 +551,71 @@ export class Pipeline {
         user = 'Unknown action. Use "query", "analyze" or "report".';
       }
     }
-    flaws = flaws || [];
-    const accepted = [];
-    const rejected = [];
-    for (const f of flaws) {
-      const verdict = await this.checkFinding(f, dbs);
-      (verdict.ok ? accepted : rejected).push({ ...f, reason: verdict.reason });
-    }
-    const serious = flaws.filter((f) => f.severity === "high" || f.severity === "medium");
-    const acceptedSerious = accepted.filter((f) => f.rule && (f.severity === "high" || f.severity === "medium"));
-    this.state.rounds.push({ round, flaws, accepted: accepted.map((f) => f.id), rejected: rejected.map((f) => ({ id: f.id, reason: f.reason })) });
-    this.state.rejected.push(...rejected.map((f) => ({ round, id: f.id, reason: f.reason })));
-    const summary = `${flaws.length} flaws (${serious.length} high/medium); ${accepted.filter((f) => f.rule).length} rules accepted, ${rejected.length} rejected`;
-    this.emit({ type: "audit", round, flaws, accepted, rejected });
-    if (!acceptedSerious.length) {
-      st.done(`${summary} - ${serious.length ? "no serious flaw could be turned into a valid rule" : "no serious flaw found"}: done`);
+    if (!flaws) {
+      // the auditor used every turn without a report: that is not a clean round, and nothing was found to apply
+      this.state.rounds.push({ round, flaws: [], accepted: [], rejected: [], incomplete: true });
+      st.info(`the auditor gave no report in ${this.s.auditTurns + 1} turns; the audit stops here (the data was not certified clean)`);
       return false;
     }
-    // apply every accepted rule; regenerate from the earliest stage it touches
+    const serious = (f) => f.severity === "high" || f.severity === "medium";
+    const checked = [];
+    for (const f of flaws) {
+      const verdict = await this.checkFinding(f, dbs);
+      checked.push(verdict.ok ? { ...f, rule: verdict.rule, reason: verdict.reason, ok: true } : { ...f, reason: verdict.reason, ok: false });
+    }
+    const accepted = checked.filter((f) => f.ok);
+    const rejected = checked.filter((f) => !f.ok);
+    const withRule = accepted.filter((f) => f.rule);
+    const adopt = withRule.some(serious) ? withRule : [];
+    // what happened to each finding, as the Audit tab and report.json show it
+    const outcome = (f) => {
+      if (!f.ok) return `rejected: ${f.reason}`;
+      if (!f.rule) return "recorded (no rule proposed)";
+      return adopt.includes(f) ? `rule ${f.rule.id} ${f.rule.op === "edit" ? "edited" : "added"}` : "rule not adopted (low severity only; no regeneration this round)";
+    };
+    const findings = checked.map((f) => ({ ...f, outcome: outcome(f) }));
+    this.state.rounds.push({ round, flaws: findings, accepted: adopt.map((f) => f.id), rejected: rejected.map((f) => ({ id: f.id, reason: f.reason })) });
+    this.state.rejected.push(...rejected.map((f) => ({ round, id: f.id, reason: f.reason })));
+    const summary = `${flaws.length} flaws (${flaws.filter(serious).length} high/medium); ${adopt.length} rules adopted, ${rejected.length} findings rejected`;
+    this.emit({ type: "audit", round, flaws: findings, accepted, rejected });
+    if (!adopt.length) {
+      st.done(`${summary} - ${flaws.some(serious) ? "no serious flaw could be turned into a valid rule" : "no serious flaw found"}: done`);
+      return false;
+    }
+    // apply the adopted rules (low ones too: the stages are regenerated anyway); regenerate from the earliest stage
+    // one of them touches. The last round's rules are applied as well, so the shipped data meets every rule.
     const rules = [...this.state.rules];
-    for (const f of accepted.filter((x) => x.rule)) {
-      const r = { id: f.rule.id, statement: String(f.rule.statement), tables: f.rule.tables.map(String), code: String(f.rule.code), origin: `audit round ${round} (${f.severity}: ${f.title || f.id})` };
+    for (const f of adopt) {
+      const { op, ...rule } = f.rule;
+      const r = { ...rule, origin: `audit round ${round} (${f.severity}: ${f.title || f.id}${op === "edit" ? ", edited" : ""})` };
       const i = rules.findIndex((x) => x.id === r.id);
       if (i >= 0) rules[i] = r; else rules.push(r);
     }
     this.state.rules = rules;
-    const first = Math.min(...accepted.filter((x) => x.rule).map((f) => ruleStage({ tables: f.rule.tables.map(String) }, this.state.stages)));
+    const first = Math.min(...adopt.map((f) => ruleStage(f.rule, this.state.stages)));
     st.done(`${summary}; regenerating from stage ${first + 1}`);
     this.emit({ type: "spec", schema: this.state.schema, triggers: this.state.triggers, rules: this.state.rules });
-    if (round === this.s.auditRounds) {
-      // the last round's rules are applied too, so the shipped data meets them
-    }
     await this.codeFrom(first);
     return round < this.s.auditRounds;
   }
 
+  // a finding's proposed rule must be well formed, must not clash with the other rules, and must FAIL on at least one
+  // database: a rule the data already meets does not describe a flaw of it. Returns the cleaned rule.
   async checkFinding(f, dbs) {
-    if (!f || !ID.test(String(f.id || ""))) return { ok: false, reason: "malformed finding" };
-    if (!f.rule) return { ok: true, reason: "no rule proposed (recorded only)" };
+    if (!isObj(f) || !ID.test(String(f.id || ""))) return { ok: false, reason: "malformed finding" };
+    if (!f.rule) return { ok: true, rule: null, reason: "no rule proposed (recorded only)" };
     const r = f.rule;
+    if (!isObj(r)) return { ok: false, reason: "the rule must be an object with op, id, statement, tables and code" };
     const id = String(r.id || "");
     if (!ID.test(id) || !String(r.code || "").includes(`def verify_${id}(`)) return { ok: false, reason: `the rule must define verify_${id}(db)` };
-    const tables = (r.tables || []).map(String);
+    const tables = strList(r.tables);
     if (!tables.length || ruleStage({ tables }, this.state.stages) < 0) return { ok: false, reason: `unknown or missing tables ${tables.join(", ")}` };
-    if (r.op === "edit" && !this.state.rules.some((x) => x.id === id)) return { ok: false, reason: `edit of a rule that does not exist (${id})` };
-    if (r.op !== "edit" && this.state.rules.some((x) => x.id === id)) return { ok: false, reason: `a rule ${id} exists already (use edit)` };
-    const rule = { id, statement: String(r.statement || id), tables, code: String(r.code) };
-    const spec = (await this.rt.call("check_spec", { schema: this.state.schema, triggers: this.state.triggers, verifiers: assembleVerifiers([rule]) })).result;
+    const op = r.op === "edit" ? "edit" : "add";
+    if (op === "edit" && !this.state.rules.some((x) => x.id === id)) return { ok: false, reason: `edit of a rule that does not exist (${id})` };
+    if (op === "add" && this.state.rules.some((x) => x.id === id)) return { ok: false, reason: `a rule ${id} exists already (use edit)` };
+    const rule = { op, id, statement: String(r.statement || id), tables, code: String(r.code) };
+    const all = [...this.state.rules.filter((x) => x.id !== id), rule];
+    const spec = (await this.rt.call("check_spec", { schema: this.state.schema, triggers: this.state.triggers, verifiers: assembleVerifiers([rule]), rule_codes: ruleCodes(all) })).result;
     if (!spec.ok) return { ok: false, reason: spec.problems.slice(0, 2).join("; ") };
     let fails = 0;
     for (const db of Object.values(dbs)) {
@@ -536,7 +623,7 @@ export class Pipeline {
       if (!v[id]?.passed) fails++;
     }
     if (!fails) return { ok: false, reason: "the rule passes on both databases: it does not describe a flaw of this data" };
-    return { ok: true, reason: `fails on ${fails} of ${Object.keys(dbs).length} databases` };
+    return { ok: true, rule, reason: `fails on ${fails} of ${Object.keys(dbs).length} databases` };
   }
 
   // -- final verification -----------------------------------------------------------------------------------------

@@ -41,9 +41,10 @@ $("description").value = store.get("sdb.description") || "";
 
 // -- the runtime ------------------------------------------------------------------------------------------------
 
-function browserRuntime() {
+// hashSeed: the worker's PYTHONHASHSEED; the second runtime (another seed) rebuilds each stage to prove it reproducible
+function browserRuntime(hashSeed) {
   return new PyRuntime(() => {
-    const w = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
+    const w = new Worker(new URL(`./worker.js?hashseed=${hashSeed}`, import.meta.url), { type: "module" });
     return {
       post: (msg) => w.postMessage(msg),
       onMessage: (cb) => { w.onmessage = (e) => cb(e.data); w.onerror = (e) => cb({ type: "fatal", error: e.message || "the worker failed to start" }); },
@@ -80,10 +81,9 @@ const TABS = {
   Plan: (s) => `<ol>${s.stages.map((st) => `<li><b>${esc(st.tables.join(", "))}</b><br><span class="muted">${esc(st.notes)}</span></li>`).join("")}</ol>`,
   Generator: (s) => s.stages.map((st, i) => `<details${i === 0 ? " open" : ""}><summary>Stage ${i + 1}: ${esc(st.tables.join(", "))}</summary><pre>${esc(s.codes[i] || "(not generated)")}</pre></details>`).join(""),
   Audit: (s) => s.rounds.length ? s.rounds.map((r) => `<h3>Round ${r.round}</h3>` + (r.flaws.length ?
-    `<table><tr><th>flaw</th><th>severity</th><th>evidence</th><th>outcome</th></tr>${r.flaws.map((f) => {
-      const rej = r.rejected.find((x) => x.id === f.id);
-      return `<tr><td>${esc(f.title || f.id)}</td><td>${esc(f.severity)}</td><td>${esc(f.evidence)}</td><td>${rej ? `rejected: ${esc(rej.reason)}` : f.rule ? `rule ${esc(f.rule.id)} added` : "recorded"}</td></tr>`;
-    }).join("")}</table>` : "<p>No flaw found.</p>")).join("") : "<p>No audit round ran.</p>",
+    `<table><tr><th>flaw</th><th>severity</th><th>evidence</th><th>outcome</th></tr>${r.flaws.map((f) =>
+      `<tr><td>${esc(f.title || f.id)}</td><td>${esc(f.severity)}</td><td>${esc(f.evidence)}</td><td>${esc(f.outcome)}</td></tr>`).join("")}</table>` :
+      r.incomplete ? "<p>The auditor gave no report; the audit stopped (the data was not certified clean).</p>" : "<p>No flaw found.</p>")).join("") : "<p>No audit round ran.</p>",
   Verification: (s) => {
     const seeds = Object.keys(s.verification);
     if (!seeds.length) return "<p>Not verified yet.</p>";
@@ -122,6 +122,7 @@ function download(blob, name) {
 
 let controller = null;
 let runtime = null;
+let checkRuntime = null;
 $("run").onclick = async () => {
   $("error").hidden = true;
   const provider = $("provider").value;
@@ -138,12 +139,13 @@ $("run").onclick = async () => {
   }
   if (description.length < 20) { $("error").textContent = "Describe the database in a few sentences first."; $("error").hidden = false; return; }
   controller = new AbortController();
-  runtime = runtime || browserRuntime();
+  runtime = runtime || browserRuntime(0);
+  checkRuntime = checkRuntime || browserRuntime(1);
   items.clear(); $("timeline").innerHTML = ""; $("timelineCard").hidden = false;
   current = null; $("resultCard").hidden = true; $("dlZip").disabled = true; $("dlDb").disabled = true;
   $("run").disabled = true; $("stop").hidden = false;
   const pipe = new Pipeline({
-    llm, runtime, signal: controller.signal, runId: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
+    llm, runtime, checkRuntime, signal: controller.signal, runId: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
     settings: { auditRounds: Number($("rounds").value), maxCalls: Number($("maxCalls").value) },
     emit: (e) => {
       if (e.type === "step") onStep(e);
@@ -154,7 +156,8 @@ $("run").onclick = async () => {
   const boot = { id: "boot", phase: "setup", title: "Starting the in-browser Python runtime (first time: ~10 MB download)", status: "running", at: Date.now() };
   onStep(boot);
   try {
-    await runtime.call("check_spec", { schema: "CREATE TABLE t (x INTEGER);", triggers: "", verifiers: "def verify_t(db):\n    return {'passed': True, 'detail': ''}\n" }, { timeoutMs: 180000 });
+    const warm = { schema: "CREATE TABLE t (x INTEGER);", triggers: "", verifiers: "def verify_t(db):\n    return {'passed': True, 'detail': ''}\n" };
+    await Promise.all([runtime.call("check_spec", warm, { timeoutMs: 180000 }), checkRuntime.call("check_spec", warm, { timeoutMs: 180000 })]);
     onStep({ ...boot, status: "done", end: Date.now() });
     const state = await pipe.run(description);
     current = state;
@@ -169,7 +172,11 @@ $("run").onclick = async () => {
     $("run").disabled = false; $("stop").hidden = true;
   }
 };
-$("stop").onclick = () => { if (controller) controller.abort(); if (runtime) { runtime.close(); runtime = null; } };
+$("stop").onclick = () => {
+  if (controller) controller.abort();
+  for (const rt of [runtime, checkRuntime]) if (rt) rt.close();
+  runtime = null; checkRuntime = null;
+};
 $("dlZip").onclick = async () => {
   const zip = await packageZip(window.JSZip, current, { provider: $("provider").value, model: $("model").value });
   download(await zip.generateAsync({ type: "blob" }), "scribbledb-package.zip");

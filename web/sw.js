@@ -2,7 +2,7 @@
 // offline): cache-first would serve an old app.js next to a new core/ module after an update, and the two halves of
 // one load must come from the same version. The Python runtime and JSZip come from version-pinned CDN URLs, so they
 // are cache-first. Model calls are never cached.
-const CACHE = "scribbledb-v7-2";
+const CACHE = "scribbledb-v7-3";
 const SHELL = ["./", "index.html", "style.css", "app.js", "worker.js", "manifest.webmanifest", "icon.svg", "icon-192.png",
   "icon-512.png", "core/llm.js", "core/pipeline.js", "core/prompts.js", "core/runtime.js", "core/package.js",
   "core/py-handler.js", "py/harness.py"];
@@ -29,7 +29,7 @@ self.addEventListener("fetch", (e) => {
       if (res.ok) cache.put(e.request, res.clone());
       return res;
     } catch (err) {
-      const hit = await cache.match(e.request);
+      const hit = await cache.match(e.request, { ignoreSearch: true }); // worker.js?hashseed=N is worker.js
       if (hit) return hit;
       throw err;
     }

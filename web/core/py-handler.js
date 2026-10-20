@@ -11,8 +11,10 @@ export async function createHandler(loadPyodide, harnessSource, pyodideOptions =
   return async function handle(msg) {
     const { fn, args, db, dbs, wantDb } = msg;
     try {
-      // packages a program imports (numpy, ...): Pyodide fetches them from its CDN on first use
-      if (msg.code) await py.loadPackagesFromImports(msg.code);
+      // packages the code of this call imports (numpy, ...) - stage programs, verifiers, the auditor's analysis:
+      // Pyodide fetches them from its CDN on first use
+      const src = [msg.code, args && args.verifiers, args && args.code].filter((s) => typeof s === "string" && s).join("\n");
+      if (src) await py.loadPackagesFromImports(src);
       const json = call(fn, JSON.stringify(args || {}), db || undefined, dbs || undefined);
       const result = JSON.parse(json);
       let out = undefined;

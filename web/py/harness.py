@@ -10,8 +10,10 @@ Generator contract (what a stage program must define):
 `db` is a sqlite3 connection to the database built so far; the stage may INSERT/UPDATE/DELETE only its own tables
 (an authorizer refuses everything else: other tables, DDL, ATTACH, and the pragmas that would switch checks off).
 `rng(name)` returns a random.Random seeded from (seed, stage, name) - the only randomness; the global `random` module
-is reseeded the same way before each stage, so a program that uses it is still deterministic."""
+(and numpy's global generator, when the program imports numpy) is reseeded the same way before each stage, so a
+program that uses it is still deterministic."""
 
+import ast
 import collections
 import contextlib
 import hashlib
@@ -21,6 +23,7 @@ import math
 import random
 import sqlite3
 import statistics
+import sys
 import time
 import traceback
 
@@ -34,6 +37,7 @@ DDL_ACTIONS = {
 BLOCKED_PRAGMAS = {"foreign_keys", "ignore_check_constraints", "writable_schema", "recursive_triggers",
                    "defer_foreign_keys", "legacy_alter_table", "trusted_schema", "query_only"}
 READ_ACTIONS = {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION}
+READ_PRAGMAS = {"table_info", "table_xinfo", "table_list", "foreign_key_list", "index_list", "index_info", "index_xinfo"}
 MAX_DETAIL = 600
 
 
@@ -107,9 +111,48 @@ def error_text(e: BaseException) -> str:
 # -- 1. the specification -----------------------------------------------------------------------------------------
 
 
-def check_spec(schema: str, triggers: str, verifiers: str) -> dict:
-    """Does the specification load, and does every verifier run on an empty database without raising?"""
+def _top_level_defs(code: str) -> dict:
+    """Names a rule's code binds at module level (functions, classes, assignments) -> a dump of the definition."""
+    out = {}
+    for node in ast.parse(code).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out[node.name] = ast.dump(node)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for t in targets:
+                for n in ast.walk(t):
+                    if isinstance(n, ast.Name):
+                        out[n.id] = ast.dump(node)
+    return out
+
+
+def namespace_problems(rule_codes: list) -> list[str]:
+    """All rules share one module (verifiers.py): two rules that bind the same name differently would silently
+    replace each other's helper or constant and change a verdict; a rule that defines another rule's verify_
+    function would replace that rule. Identical duplicate helpers are harmless. Imports are not counted."""
     problems: list[str] = []
+    owner: dict = {}
+    for rid, code in rule_codes:
+        try:
+            defs = _top_level_defs(code)
+        except SyntaxError as e:
+            problems.append(f"rule {rid}: its code does not parse: {e}")
+            continue
+        for name, dump in defs.items():
+            if name.startswith("verify_") and name != f"verify_{rid}":
+                problems.append(f"rule {rid} defines {name}, which belongs to another rule; define only verify_{rid}")
+                continue
+            if name in owner and owner[name][1] != dump:
+                problems.append(f"rules {owner[name][0]} and {rid} both define {name} differently (all rules share one "
+                                f"module); give helpers and constants rule-specific names, e.g. _{rid}_{name.lstrip('_')}")
+            owner.setdefault(name, (rid, dump))
+    return problems
+
+
+def check_spec(schema: str, triggers: str, verifiers: str, rule_codes: list | None = None) -> dict:
+    """Does the specification load, and does every verifier run on an empty database without raising?
+    rule_codes: [[id, code], ...] - the rules' separate sources, checked for clashing module-level names."""
+    problems: list[str] = list(namespace_problems(rule_codes)) if rule_codes else []
     info: list[dict] = []
     try:
         con = new_db(schema, triggers)
@@ -154,8 +197,11 @@ def rng_factory(seed: int, stage: int):
 
 
 def guard(allowed: set):
+    # `source` is the trigger (or view) the statement runs in: a write made by one of the specification's own
+    # triggers (an AFTER INSERT trigger keeping a summary table current) is the schema's behaviour, not the stage
+    # writing another stage's table, so it is allowed. DDL stays refused, so no stage can add a trigger.
     def authorizer(action, arg1, arg2, dbname, source):
-        if action in WRITE_ACTIONS and arg1 not in allowed:
+        if action in WRITE_ACTIONS and arg1 not in allowed and source is None:
             return sqlite3.SQLITE_DENY
         if action in DDL_ACTIONS:
             return sqlite3.SQLITE_DENY
@@ -196,6 +242,9 @@ def build(schema: str, triggers: str, stages: list[dict], seed: int) -> dict:
             if not callable(gen):
                 raise ValueError("the program defines no generate(db, rng) function")
             random.seed(int.from_bytes(hashlib.sha256(f"{seed}/{st['index']}/global".encode()).digest()[:8], "big"))
+            np = sys.modules.get("numpy")
+            if np is not None:
+                np.random.seed(int.from_bytes(hashlib.sha256(f"{seed}/{st['index']}/numpy".encode()).digest()[:4], "big"))
             con.set_authorizer(guard(set(st["tables"])))
             with contextlib.redirect_stdout(buf):
                 gen(con, rng_factory(seed, st["index"]))
@@ -267,8 +316,9 @@ def verify(data: bytes, verifiers: str, rule_ids=None) -> dict:
 def read_only(action, arg1, arg2, dbname, source):
     if action in READ_ACTIONS:
         return sqlite3.SQLITE_OK
-    if action == sqlite3.SQLITE_PRAGMA and (arg1 or "").lower() in ("table_info", "foreign_key_list", "index_list",
-                                                                    "index_info") and arg2 is None:
+    # schema-reading pragmas, with their table argument (PRAGMA table_info(t) passes the table as arg2); a pragma
+    # with "= value" is a write and is not in this list
+    if action == sqlite3.SQLITE_PRAGMA and (arg1 or "").lower() in READ_PRAGMAS:
         return sqlite3.SQLITE_OK
     return sqlite3.SQLITE_DENY
 

@@ -5,7 +5,9 @@ import { assembleVerifiers } from "./pipeline.js";
 
 export const GENERATE_PY = `"""Rebuild the database: python generate.py --seed SEED --out database.sqlite
 Runs the stage programs in generator/ in order on a fresh database with schema.sql and triggers.sql - exactly as the
-app did: each stage may write only its own tables; rng(name) is seeded from (seed, stage, name)."""
+app did: each stage may write only its own tables (its triggers aside); rng(name) is seeded from (seed, stage, name);
+the global random module and numpy's global generator are reseeded per stage. When the package ships a database for
+SEED, the rebuild is compared with it table by table."""
 import argparse, hashlib, json, os, random, sqlite3, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -28,7 +30,7 @@ def rng_factory(seed, stage):
 
 def guard(allowed):
     def auth(action, arg1, arg2, dbname, source):
-        if action in WRITE and arg1 not in allowed:
+        if action in WRITE and arg1 not in allowed and source is None:
             return sqlite3.SQLITE_DENY
         if action in DDL:
             return sqlite3.SQLITE_DENY
@@ -36,6 +38,11 @@ def guard(allowed):
             return sqlite3.SQLITE_DENY
         return sqlite3.SQLITE_OK
     return auth
+
+
+def table_rows(con):
+    names = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
+    return {t: sorted(repr(r) for r in con.execute(f'SELECT * FROM "{t}"')) for t in names}
 
 
 def main():
@@ -53,20 +60,33 @@ def main():
         con.executescript(trig)
     con.commit()
     plan = json.load(open(os.path.join(HERE, "generator", "stages.json"), encoding="utf-8"))
-    for st in plan:
+    for st in plan["stages"]:
         ns = {"__name__": st["file"]}
         exec(compile(open(os.path.join(HERE, "generator", st["file"]), encoding="utf-8").read(), st["file"], "exec"), ns)
         random.seed(int.from_bytes(hashlib.sha256(f"{a.seed}/{st['index']}/global".encode()).digest()[:8], "big"))
+        if "numpy" in sys.modules:
+            sys.modules["numpy"].random.seed(int.from_bytes(hashlib.sha256(f"{a.seed}/{st['index']}/numpy".encode()).digest()[:4], "big"))
         con.set_authorizer(guard(set(st["tables"])))
         ns["generate"](con, rng_factory(a.seed, st["index"]))
         con.set_authorizer(None)
         con.commit()
+        bad = con.execute("PRAGMA foreign_key_check").fetchall()
+        if bad:
+            sys.exit(f"stage {st['index'] + 1}: foreign keys broken: {bad[:5]}")
         print(f"stage {st['index'] + 1}: {', '.join(st['tables'])} done")
-    bad = con.execute("PRAGMA foreign_key_check").fetchall()
-    con.close()
-    if bad:
-        sys.exit(f"foreign keys broken: {bad[:5]}")
     print(f"wrote {a.out}")
+    shipped = plan.get("databases", {}).get(str(a.seed))
+    if shipped and os.path.exists(os.path.join(HERE, shipped)):
+        ref = sqlite3.connect(os.path.join(HERE, shipped))
+        mine, theirs = table_rows(con), table_rows(ref)
+        ref.close()
+        differ = [t for t in sorted(set(mine) | set(theirs)) if mine.get(t) != theirs.get(t)]
+        if differ:
+            con.close()
+            sys.exit(f"the rebuild differs from {shipped} in: {', '.join(differ)} (a different Python/SQLite/numpy "
+                     "version can change floating-point or library results)")
+        print(f"identical to {shipped}, row for row")
+    con.close()
 
 
 if __name__ == "__main__":
@@ -75,7 +95,7 @@ if __name__ == "__main__":
 
 export const VERIFY_PY = `"""Check a database against every rule: python verify.py database.sqlite
 Exit code 0 when every rule and the integrity checks pass."""
-import os, sqlite3, sys
+import os, pathlib, sqlite3, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -89,7 +109,9 @@ class DB:
 
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "database.sqlite")
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    if not os.path.exists(path):
+        sys.exit(f"no such file: {path}")
+    con = sqlite3.connect(pathlib.Path(path).resolve().as_uri() + "?mode=ro", uri=True)
     ns = {"__name__": "verifiers"}
     exec(compile(open(os.path.join(HERE, "verifiers.py"), encoding="utf-8").read(), "verifiers.py", "exec"), ns)
     failed = 0
@@ -123,11 +145,12 @@ export function packageFiles(state, settings = {}) {
   files["triggers.sql"] = (state.triggers || "").trim() + "\n";
   files["verifiers.py"] = assembleVerifiers(state.rules);
   const stages = state.stages.map((s, i) => ({ index: i, tables: s.tables, file: `stage_${String(i + 1).padStart(2, "0")}_${slug(s.tables)}.py` }));
-  files["generator/stages.json"] = JSON.stringify(stages, null, 1) + "\n";
+  const dbFile = (seed, i) => (i === 0 ? "database.sqlite" : `database_seed_${seed}.sqlite`);
+  files["generator/stages.json"] = JSON.stringify({ stages, databases: Object.fromEntries(seeds.map((s, i) => [String(s), dbFile(s, i)])) }, null, 1) + "\n";
   stages.forEach((s, i) => { files[`generator/${s.file}`] = (state.codes[i] || "# this stage was not generated\n").trim() + "\n"; });
   files["generate.py"] = GENERATE_PY;
   files["verify.py"] = VERIFY_PY;
-  seeds.forEach((seed, i) => { files[i === 0 ? "database.sqlite" : `database_seed_${seed}.sqlite`] = state.databases[seed]; });
+  seeds.forEach((seed, i) => { files[dbFile(seed, i)] = state.databases[seed]; });
   files["report.json"] = JSON.stringify({ description: state.description, seeds, verification: state.verification,
     rules: state.rules.map(({ id, statement, tables, origin }) => ({ id, statement, tables, origin })), plan: state.stages,
     audit_rounds: state.rounds, rejected_findings: state.rejected, research: state.research, settings }, null, 1) + "\n";
@@ -143,7 +166,8 @@ function readme(state, seeds, stages) {
   }
   const v = state.verification[seeds[0]] || {};
   const rows = state.rules.map((r) => `| ${r.id} | ${v[r.id]?.passed ? "pass" : "FAIL"} | ${r.statement.replace(/\|/g, "/")} | ${r.origin} |`);
-  const rounds = state.rounds.map((r) => `- Round ${r.round}: ${r.flaws.length} flaws reported; rules accepted: ${r.accepted.join(", ") || "none"}; rejected: ${r.rejected.map((x) => `${x.id} (${x.reason})`).join(", ") || "none"}`);
+  const rounds = state.rounds.map((r) => r.incomplete ? `- Round ${r.round}: the auditor gave no report; the audit stopped (the data was not certified clean)` :
+    `- Round ${r.round}: ${r.flaws.length} flaws reported; rules adopted: ${r.accepted.join(", ") || "none"}; rejected: ${r.rejected.map((x) => `${x.id} (${x.reason})`).join(", ") || "none"}`);
   return `# Generated database package
 
 ## The request
@@ -160,7 +184,7 @@ ${state.description}
 - \`verify.py\` - checks any database against every rule: \`python verify.py database.sqlite\`.
 - \`report.json\`, \`lineage.json\` - every step the pipeline took, the audit rounds and the findings it rejected.
 
-Requires only Python 3.10+ (standard library${state.codes.some((c) => /import numpy|from numpy/.test(c)) ? " and numpy" : ""}).
+Requires only Python 3.12+ (standard library${state.codes.some((c) => /import numpy|from numpy/.test(c)) ? " and numpy" : ""}); the app ran it on CPython 3.12 with SQLite 3.39 (Pyodide 0.26). \`generate.py\` says whether its rebuild is identical to the shipped database.
 
 ## Rules and their result on database.sqlite
 

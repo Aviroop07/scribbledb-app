@@ -59,7 +59,10 @@ export const CODE_SYSTEM = `You write one stage of a synthetic-database generato
   tables are readable. DDL and the pragmas that disable checks are refused. The schema's CHECKs, foreign keys and
   triggers are enforced on every insert: an insert that breaks one raises and the stage fails.
 - rng(name) returns a random.Random seeded from the run's seed and the name (use a few named streams). It is the only
-  allowed source of randomness; never use time or os.urandom. Standard library and numpy may be imported.
+  allowed source of randomness; never use time or os.urandom. Standard library and numpy may be imported (seed numpy
+  from rng, e.g. numpy.random.default_rng(rng('np').getrandbits(64))).
+- The same seed must give the same rows in any Python: the stage is rebuilt in a second interpreter whose string
+  hashing differs, so never let the iteration order of a set (or of a dict built from one) decide rows - sort it first.
 - The program must USE THE SEED: different seeds must give this stage's tables different rows (counts, values,
   assignments drawn from rng within what the rules allow). A table whose content the rules fully fix (a fixed list
   the description names) may be declared at module level: FIXED = {"table_name": "why the rules fix it"}.

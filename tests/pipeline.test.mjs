@@ -3,7 +3,7 @@
 // audit), on the real runtime. Then the package's standalone generate.py/verify.py run under the system Python.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -12,8 +12,9 @@ import { Pipeline, validatePlan, defaultPlan, hiddenSeeds } from "../web/core/pi
 import { packageFiles } from "../web/core/package.js";
 import { scriptedModel } from "./scripted.mjs";
 
-const rt = nodeRuntime();
-test.after(() => rt.close());
+const rt = nodeRuntime({ hashSeed: 0 });
+const rt2 = nodeRuntime({ hashSeed: 1 });
+test.after(() => { rt.close(); rt2.close(); });
 
 test("plan validation and the deterministic plan", () => {
   const tables = [{ name: "a", references: [] }, { name: "b", references: ["a"] }, { name: "c", references: ["b"] }];
@@ -28,17 +29,26 @@ test("plan validation and the deterministic plan", () => {
 test("the pipeline runs end to end and its package rebuilds and verifies outside the app", async () => {
   const llm = scriptedModel();
   const events = [];
-  const p = new Pipeline({ llm, runtime: rt, emit: (e) => events.push(e), runId: "test-run", settings: { auditRounds: 3 } });
+  const p = new Pipeline({ llm, runtime: rt, checkRuntime: rt2, emit: (e) => events.push(e), runId: "test-run", settings: { auditRounds: 3 } });
   const state = await p.run("A small venue with meeting rooms and bookings of groups that fit the rooms.");
-  // the room stage was first a fixed table (seed-use gate), then passed
-  assert.equal(llm.seen.code.room, 2);
+  // the first specification was malformed (a null rule, a rule without code): fixed on the second attempt
+  assert.equal(llm.seen.spec, 2);
+  // the room stage was first a fixed table (seed-use gate), then a set-order program (reproducibility check), then passed
+  assert.equal(llm.seen.code.room, 3);
   const roomStep = state.lineage.find((s) => s.title.startsWith("Stage 1"));
   assert.equal(roomStep.status, "done");
-  // the audit rule was accepted and the booking stage regenerated to meet it
+  // the audit rule was accepted and the booking stage regenerated to meet it; the null finding was dropped
   assert.ok(state.rules.some((r) => r.id === "rarely_full" && /audit round 1/.test(r.origin)));
+  assert.ok(state.rules.every((r) => !("op" in r)));
   assert.equal(state.rounds.length, 2);
   assert.deepEqual(state.rounds[0].accepted, ["full_rooms"]);
-  assert.equal(state.rounds[1].flaws.length, 0);
+  assert.equal(state.rounds[0].flaws.length, 1);
+  assert.match(state.rounds[0].flaws[0].outcome, /rule rarely_full added/);
+  // round 2: a low-severity finding with a failing rule is recorded but not adopted, and the audit ends
+  assert.equal(state.rounds[1].flaws.length, 1);
+  assert.match(state.rounds[1].flaws[0].outcome, /not adopted/);
+  assert.deepEqual(state.rounds[1].accepted, []);
+  assert.ok(!state.rules.some((r) => r.id === "small_groups"));
   // every rule passes on both final databases
   for (const v of Object.values(state.verification)) for (const [id, r] of Object.entries(v)) assert.ok(r.passed, id);
   assert.ok(events.some((e) => e.type === "finished"));
@@ -49,10 +59,29 @@ test("the pipeline runs end to end and its package rebuilds and verifies outside
     writeFileSync(join(dir, name), content);
   }
   const seed = Number(Object.keys(state.databases)[0]);
-  execFileSync("python", [join(dir, "generate.py"), "--seed", String(seed), "--out", join(dir, "rebuilt.sqlite")]);
+  const gen = execFileSync("python", [join(dir, "generate.py"), "--seed", String(seed), "--out", join(dir, "rebuilt.sqlite")]).toString();
+  assert.match(gen, /identical to database\.sqlite, row for row/);
   const ok = execFileSync("python", [join(dir, "verify.py"), join(dir, "rebuilt.sqlite")]).toString();
   assert.match(ok, /all checks pass/);
   const dump = (f) => execFileSync("python", ["-c",
     "import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);print([c.execute(f'SELECT * FROM {t} ORDER BY 1').fetchall() for t in ('room','booking')])", f]).toString();
   assert.equal(dump(join(dir, "rebuilt.sqlite")), dump(join(dir, "database.sqlite")));
+  // generate.py notices a rebuild that differs from the shipped database
+  const stagesJson = JSON.parse(readFileSync(join(dir, "generator", "stages.json"), "utf8"));
+  writeFileSync(join(dir, "generator", stagesJson.stages[0].file), readFileSync(join(dir, "generator", stagesJson.stages[0].file), "utf8").replace("r.randint(20, 150)", "r.randint(21, 151)"));
+  assert.throws(() => execFileSync("python", [join(dir, "generate.py"), "--seed", String(seed), "--out", join(dir, "rebuilt2.sqlite")], { stdio: "pipe" }), /differs from database\.sqlite/);
+});
+
+test("regression: an auditor that never reports leaves the round marked incomplete, not clean", async () => {
+  // root cause: a missing report was read as an empty one ("no serious flaw found: done")
+  const llm = scriptedModel({ auditorNeverReports: true });
+  const p = new Pipeline({ llm, runtime: rt, runId: "test-run-2", settings: { auditRounds: 2, auditTurns: 2 } });
+  const state = await p.run("A small venue with meeting rooms and bookings of groups that fit the rooms.");
+  assert.equal(state.rounds.length, 1);
+  assert.equal(state.rounds[0].incomplete, true);
+  assert.equal(llm.seen.auditTurns, 3);
+  const auditStep = state.lineage.find((s) => s.phase === "audit");
+  assert.equal(auditStep.status, "info");
+  assert.match(auditStep.detail, /no report/);
+  assert.match(packageFiles(state)["README.md"], /not certified clean/);
 });

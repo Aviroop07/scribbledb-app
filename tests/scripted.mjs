@@ -16,6 +16,14 @@ BEGIN SELECT RAISE(ABORT, 'too many people') WHERE NEW.people > (SELECT seats FR
 };
 const ROOMS = "def generate(db, rng):\n    r = rng('rooms')\n    for i in range(1, r.randint(4, 8) + 1):\n        db.execute('INSERT INTO room VALUES (?, ?)', (i, r.randint(20, 150)))\n";
 const ROOMS_FIXED = "def generate(db, rng):\n    for i in range(1, 6):\n        db.execute('INSERT INTO room VALUES (?, ?)', (i, 50))\n";
+// uses its seed and passes every rule, but its rows follow a set's iteration order (the reproducibility check)
+const ROOMS_BY_SET = "def generate(db, rng):\n    r = rng('rooms')\n    names = {'ash', 'birch', 'cedar', 'elm', 'fir', 'hazel', 'oak', 'pine'}\n" +
+  "    for i, n in enumerate(list(names)[:r.randint(4, 8)]):\n        db.execute('INSERT INTO room VALUES (?, ?)', (i + 1, 20 + len(n) * 10 + r.randint(0, 9)))\n";
+// a malformed first specification: a null rule and a rule without code
+const SPEC_BAD = { ...SPEC, rules: [null, { id: "room_count", statement: "x", tables: "room" }] };
+// a low-severity finding whose rule fails on the data: recorded, not adopted
+const LOW_RULE = { op: "add", id: "small_groups", statement: "Every booking has at most 5 people.", tables: ["booking"],
+  code: "def verify_small_groups(db):\n    n = db.query('SELECT COUNT(*) FROM booking WHERE people > 5')[0][0]\n    return {'passed': n == 0, 'detail': n}" };
 const BOOK_FEW = "def generate(db, rng):\n    r = rng('b')\n    rooms = db.execute('SELECT room_id, seats FROM room').fetchall()\n    for i in range(1, 11):\n        rid, s = r.choice(rooms)\n        db.execute('INSERT INTO booking VALUES (?, ?, ?)', (i, rid, r.randint(1, s)))\n";
 const BOOK_OK = BOOK_FEW.replace("range(1, 11)", "range(1, r.randint(30, 60) + 1)");
 // the audit's rule: groups uniformly drawn up to the room's size fill rooms past 90% ~10% of the time; real bookings
@@ -24,8 +32,9 @@ const BOOK_REVISED = BOOK_OK.replace("r.randint(1, s)", "r.randint(1, max(1, s *
 const AUDIT_RULE = { op: "add", id: "rarely_full", statement: "At most 5% of bookings fill their room to more than 90% of its seats.", tables: ["room", "booking"],
   code: "def verify_rarely_full(db):\n    rows = db.query('SELECT b.people, r.seats FROM booking b JOIN room r USING(room_id)')\n    if not rows:\n        return {'passed': False, 'detail': 'empty'}\n    full = sum(1 for p, s in rows if p * 10 > 9 * s)\n    return {'passed': full * 20 <= len(rows), 'detail': f'{full}/{len(rows)}'}" };
 
-export function scriptedModel() {
-  const seen = { code: {}, audit: 0, auditTurns: 0 };
+// options: auditorNeverReports - the auditor only ever queries (the incomplete-audit path)
+export function scriptedModel({ auditorNeverReports = false } = {}) {
+  const seen = { code: {}, audit: 0, auditTurns: 0, spec: 0 };
   return {
     seen,
     usage: { calls: 0, input: 0, output: 0 },
@@ -33,18 +42,23 @@ export function scriptedModel() {
     async complete({ system, messages }) {
       this.usage.calls++;
       const last = messages[messages.length - 1].content;
-      if (system === SPEC_SYSTEM) return { text: "```json\n" + JSON.stringify(SPEC) + "\n```" };
+      if (system === SPEC_SYSTEM) return { text: "```json\n" + JSON.stringify(++seen.spec === 1 ? SPEC_BAD : SPEC) + "\n```" };
       if (system === PLAN_SYSTEM) return { text: JSON.stringify({ stages: [{ tables: ["room"], notes: "draw counts" }, { tables: ["booking"], notes: "fit groups" }] }) };
       if (system === CODE_SYSTEM) {
         const stage = /It writes: (\w+)/.exec(last)[1];
         const n = (seen.code[stage] = (seen.code[stage] || 0) + 1);
-        if (stage === "room") return { text: "```python\n" + (n === 1 ? ROOMS_FIXED : ROOMS) + "```" };
+        if (stage === "room") return { text: "```python\n" + [ROOMS_FIXED, ROOMS_BY_SET, ROOMS][Math.min(n, 3) - 1] + "```" };
         if (/rarely_full/.test(last)) return { text: "```python\n" + BOOK_REVISED + "```" };
         return { text: "```python\n" + (n === 1 ? BOOK_FEW : BOOK_OK) + "```" };
       }
       if (system === AUDIT_SYSTEM) {
         seen.auditTurns++;
-        if (/^Result/.test(last)) return { text: JSON.stringify({ action: "report", flaws: seen.audit === 1 ? [{ id: "full_rooms", severity: "medium", title: "rooms often full", evidence: "x", rule: AUDIT_RULE }] : [] }) };
+        if (auditorNeverReports) return { text: JSON.stringify({ action: "query", seed: 0, sql: "SELECT 1" }) };
+        if (/^Result/.test(last)) {
+          const flaws = seen.audit === 1 ? [{ id: "full_rooms", severity: "medium", title: "rooms often full", evidence: "x", rule: AUDIT_RULE }, null]
+            : [{ id: "big_groups", severity: "low", title: "groups are large", evidence: "y", rule: LOW_RULE }];
+          return { text: JSON.stringify({ action: "report", flaws }) };
+        }
         seen.audit++;
         return { text: JSON.stringify({ action: "query", seed: 0, sql: "SELECT COUNT(*) FROM booking" }) };
       }
