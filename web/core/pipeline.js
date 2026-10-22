@@ -361,7 +361,8 @@ export class Pipeline {
       if (!built.result.ok) {
         const bad = built.result.stages.find((s) => !s.ok);
         if (bad && bad.index < k) return { ok: false, earlier: true, feedback: `an earlier stage failed on ${name}: ${bad.error}` };
-        return { ok: false, feedback: `On ${name} the program raised:\n${rec?.error || "unknown error"}${rec?.output ? `\nIt printed:\n${rec.output}` : ""}` };
+        // raised: the program stopped itself - often on purpose, with its own diagnosis of a rule it cannot meet
+        return { ok: false, raised: true, feedback: `On ${name} the program raised:\n${rec?.error || "unknown error"}${rec?.output ? `\nIt printed:\n${rec.output}` : ""}` };
       }
       seconds = Math.max(seconds, rec.seconds);
       fixed = rec.fixed || {};
@@ -434,6 +435,7 @@ export class Pipeline {
     }
     for (;;) {
       let lastFails = [];
+      let lastRaised = false;
       for (let attempt = 1; attempt <= this.s.codeAttempts; attempt++) {
         st.update(`attempt ${attempt}${feedback ? `\nlast problems:\n${clip(feedback, 900)}` : ""}`);
         let code;
@@ -466,14 +468,25 @@ export class Pipeline {
         previous = code;
         feedback = result.feedback;
         lastFails = result.fails || [];
+        lastRaised = Boolean(result.raised);
       }
-      if (repairsLeft-- <= 0 || !lastFails.length) {
+      // a program that raised gets the repair step too: its message is often a correct diagnosis of a rule that is
+      // infeasible or whose check measures the wrong thing (baseline 2026-10-22: 4 of 5 failed runs ended this way
+      // without repair ever running)
+      if (repairsLeft-- <= 0 || (!lastFails.length && !lastRaised)) {
         st.fail(`no program passed after ${this.s.codeAttempts} attempts:\n${clip(feedback, 1500)}`);
         throw new PipelineError(`stage ${k + 1} (${s.tables.join(", ")}) could not be generated: ${clip(feedback, 600)}`, this.state);
       }
-      await this.repair(k, lastFails, feedback);
+      await this.repair(k, lastFails.length ? lastFails : this.namedRules(k, feedback), feedback);
       feedback = `The rules were revised after your attempts. Previous problems:\n${feedback}`;
     }
+  }
+
+  // the stage's rules a raised message names (as {rule} records for repair); every rule of the stage when it names none
+  namedRules(k, feedback) {
+    const rules = this.rulesOf(k);
+    const named = rules.filter((r) => new RegExp(`\\b${r.id}\\b`).test(feedback));
+    return (named.length ? named : rules).map((r) => ({ rule: r.id }));
   }
 
   async repair(k, fails, feedback) {
