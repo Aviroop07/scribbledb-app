@@ -4,9 +4,10 @@
   "description": "An agentic framework that turns a plain-language description into a verified SQLite database package.",
   "type": "module",
   "scripts": {
-    "test": "node --test \"tests/*.test.mjs\"",
+    "test": "node --test \"tests/invariant/*.test.mjs\" \"tests/*.test.mjs\"",
     "serve": "node node/serve.mjs",
-    "deploy": "git push origin main && git subtree push --prefix web origin gh-pages"
+    "deploy": "git push origin main && git subtree push --prefix web origin gh-pages",
+    "test:invariant": "node --test \"tests/invariant/*.test.mjs\""
   },
   "license": "MIT",
   "dependencies": {

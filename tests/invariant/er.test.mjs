@@ -2,7 +2,7 @@
 // one relationship whose cardinality follows the column's NOT NULL.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { erDiagram } from "../web/core/er.js";
+import { erDiagram } from "../../web/core/er.js";
 
 const TABLES = [
   { name: "authors", columns: [{ name: "author_id", type: "INTEGER", notnull: false, pk: true }, { name: "name", type: "VARCHAR(40)", notnull: true, pk: false }], references: [], fks: [] },
