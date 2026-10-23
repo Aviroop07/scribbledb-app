@@ -104,6 +104,19 @@ export function ruleStage(rule, stages) {
   return at;
 }
 
+// The earliest stage whose rows a rule reads. A rule is checked at ruleStage (its last table), but the rows of its
+// earlier tables are fixed by then: a rule over two stages' tables (names of both, prices of both) can only be met
+// if the earlier stage knows it (autotune loop 2: such rules, mostly added by the audit, ended runs with "this stage
+// cannot repair the earlier table").
+export function firstRuleStage(rule, stages) {
+  let at = Infinity;
+  for (const t of rule.tables) {
+    const i = stages.findIndex((s) => s.tables.includes(t));
+    if (i >= 0) at = Math.min(at, i);
+  }
+  return at === Infinity ? -1 : at;
+}
+
 // -- the pipeline -------------------------------------------------------------------------------------------------
 
 export class Pipeline {
@@ -323,10 +336,17 @@ export class Pipeline {
     return this.state.rules.filter((r) => ruleStage(r, this.state.stages) === k);
   }
 
+  // rules checked at a later stage that also read stage k's tables: stage k's rows must make them satisfiable
+  laterRulesOf(k) {
+    const own = new Set(this.state.stages[k].tables);
+    return this.state.rules.filter((r) => ruleStage(r, this.state.stages) > k && r.tables.some((t) => own.has(t)));
+  }
+
   // -- code -------------------------------------------------------------------------------------------------------
 
-  async codeFrom(first) {
-    for (let k = first; k < this.state.stages.length; k++) await this.codeStage(k);
+  // revise: {stage index: reason} - stages that must rework their program for a rule they feed but do not check
+  async codeFrom(first, revise = {}) {
+    for (let k = first; k < this.state.stages.length; k++) await this.codeStage(k, revise[k] || "");
   }
 
   stagesFor(k, code) {
@@ -411,23 +431,29 @@ export class Pipeline {
   codePrompt(k, previous, feedback) {
     const s = this.state.stages[k];
     const rules = this.rulesOf(k);
+    const later = this.laterRulesOf(k);
     const earlier = this.state.stages.slice(0, k).flatMap((x) => x.tables);
     return `Database description:\n${this.state.description}\n\nSchema (SQLite):\n${this.state.schema}\n\nTriggers:\n${this.state.triggers || "(none)"}\n\n` +
       `This is stage ${k + 1} of ${this.state.stages.length}. It writes: ${s.tables.join(", ")}. Already written by earlier stages (readable): ${earlier.join(", ") || "nothing"}.\n` +
       `Plan notes for this stage:\n${s.notes || "(none)"}\n\n` +
       `Rules this stage must make hold on every seed (each with its exact check):\n${rules.map((r) => `### ${r.id}: ${r.statement}\n${r.code}`).join("\n\n") || "(no rule beyond the schema)"}\n\n` +
+      (later.length ? `Rules checked at a later stage that also read this stage's tables. The later stage cannot change these rows, so this stage's rows must make each rule satisfiable (each with its exact check):\n${later.map((r) => `### ${r.id} [${r.tables.join(", ")}]: ${r.statement}\n${r.code}`).join("\n\n")}\n\n` : "") +
       (previous ? `Your previous program:\n\`\`\`python\n${previous}\n\`\`\`\n\nWhat went wrong:\n${feedback}\n\nFix the cause in the algorithm (do not special-case a seed) and give the complete program.` :
         "Write the program.");
   }
 
-  async codeStage(k) {
+  async codeStage(k, revise = "") {
     const s = this.state.stages[k];
     const st = this.step("code", `Stage ${k + 1}: generator for ${s.tables.join(", ")}`);
     let repairsLeft = this.s.repairs;
-    // a stage regenerated after a revision starts from its current program: kept as it is when it still passes
+    // a stage regenerated after a revision starts from its current program: kept as it is when it still passes -
+    // unless a new rule checked later reads its tables (its own checks cannot see that rule, so passing them proves
+    // nothing about it): then the coder reworks the program with that rule as the reason
     let previous = this.state.codes[k] || "";
     let feedback = "";
-    if (previous) {
+    if (previous && revise) {
+      feedback = revise;
+    } else if (previous) {
       const ev = await this.evaluate(k, previous, this.s.shownSeeds, false);
       const hid = ev.ok ? await this.evaluate(k, previous, this.hidden, true) : null;
       if (ev.ok && hid.ok) { st.done("the existing program still passes every rule"); return; }
@@ -634,10 +660,22 @@ export class Pipeline {
       if (i >= 0) rules[i] = r; else rules.push(r);
     }
     this.state.rules = rules;
-    const first = Math.min(...adopt.map((f) => ruleStage(f.rule, this.state.stages)));
+    // regenerate from the earliest stage an adopted rule reads, not the stage that checks it; every earlier stage it
+    // reads reworks its program for it (see firstRuleStage)
+    const revise = {};
+    for (const f of adopt) {
+      const at = ruleStage(f.rule, this.state.stages);
+      for (const t of f.rule.tables) {
+        const i = this.state.stages.findIndex((x) => x.tables.includes(t));
+        if (i >= 0 && i < at) (revise[i] ||= []).push(f.rule);
+      }
+    }
+    const first = Math.min(...adopt.map((f) => firstRuleStage(f.rule, this.state.stages)));
+    const reasons = Object.fromEntries(Object.entries(revise).map(([i, rs]) => [i,
+      `A new rule checked at a later stage reads this stage's tables, and the later stage cannot change these rows. Rework the program so its rows make it satisfiable:\n${rs.map((r) => `- ${r.id} [${r.tables.join(", ")}]: ${r.statement}`).join("\n")}`]));
     st.done(`${summary}; regenerating from stage ${first + 1}`);
     this.emit({ type: "spec", schema: this.state.schema, triggers: this.state.triggers, rules: this.state.rules });
-    await this.codeFrom(first);
+    await this.codeFrom(first, reasons);
     return round < this.s.auditRounds;
   }
 
