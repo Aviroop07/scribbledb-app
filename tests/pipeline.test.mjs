@@ -68,6 +68,11 @@ test("the pipeline runs end to end and its package rebuilds and verifies outside
   const dump = (f) => execFileSync("python", ["-c",
     "import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);print([c.execute(f'SELECT * FROM {t} ORDER BY 1').fetchall() for t in ('room','booking')])", f]).toString();
   assert.equal(dump(join(dir, "rebuilt.sqlite")), dump(join(dir, "database.sqlite")));
+  // generate.py adds the harness's foreign-key indexes too, so a user's rebuild runs as fast as the app's
+  const indexes = (f) => execFileSync("python", ["-c",
+    "import sqlite3,sys;print(sqlite3.connect(sys.argv[1]).execute(\"SELECT name, sql FROM sqlite_master WHERE type='index' ORDER BY 1\").fetchall())", f]).toString();
+  assert.match(indexes(join(dir, "rebuilt.sqlite")), /sdb_fk_booking_0/);
+  assert.equal(indexes(join(dir, "rebuilt.sqlite")), indexes(join(dir, "database.sqlite")));
   // generate.py notices a rebuild that differs from the shipped database
   const stagesJson = JSON.parse(readFileSync(join(dir, "generator", "stages.json"), "utf8"));
   writeFileSync(join(dir, "generator", stagesJson.stages[0].file), readFileSync(join(dir, "generator", stagesJson.stages[0].file), "utf8").replace("r.randint(20, 150)", "r.randint(21, 151)"));

@@ -41,6 +41,25 @@ def guard(allowed):
     return auth
 
 
+def fk_indexes(con):
+    # the app's harness indexes every foreign key no index or rowid key leads with (speed only; no data changes)
+    out = []
+    for (t,) in con.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").fetchall():
+        cols = {r[1]: r for r in con.execute(f'PRAGMA table_info("{t}")')}
+        rowid = [c for c, r in cols.items() if r[5] == 1 and r[2].upper() == "INTEGER" and sum(x[5] > 0 for x in cols.values()) == 1]
+        leads = [[r[2] for r in con.execute(f'PRAGMA index_info("{i[1]}")')] for i in con.execute(f'PRAGMA index_list("{t}")').fetchall()]
+        fks = {}
+        for r in con.execute(f'PRAGMA foreign_key_list("{t}")'):
+            fks.setdefault(r[0], []).append((r[1], r[3]))
+        for n, (fid, pairs) in enumerate(sorted(fks.items())):
+            fk = [c for _, c in sorted(pairs)]
+            if fk == rowid or any(ix[: len(fk)] == fk for ix in leads):
+                continue
+            leads.append(fk)
+            out.append(f'CREATE INDEX "sdb_fk_{t}_{n}" ON "{t}"({", ".join(chr(34) + c + chr(34) for c in fk)})')
+    return out
+
+
 def table_rows(con):
     names = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
     return {t: sorted(repr(r) for r in con.execute(f'SELECT * FROM "{t}"')) for t in names}
@@ -56,6 +75,8 @@ def main():
     con = sqlite3.connect(a.out)
     con.execute("PRAGMA foreign_keys = ON")
     con.executescript(open(os.path.join(HERE, "schema.sql"), encoding="utf-8").read())
+    for sql in fk_indexes(con):
+        con.execute(sql)
     trig = open(os.path.join(HERE, "triggers.sql"), encoding="utf-8").read()
     if trig.strip():
         con.executescript(trig)
