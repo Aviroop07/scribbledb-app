@@ -86,6 +86,19 @@ test("regression: a serious finding whose rule is broken gets one correction ins
   assert.ok(state.rules.some((r) => r.id === "rarely_full"));
 });
 
+test("regression: a generator that raises a diagnosis of a broken check reaches the repair step", async () => {
+  // baseline 2026-10-22: 4 of 5 failed runs ended with the coder raising a correct diagnosis; repair never ran
+  const llm = scriptedModel({ buggyCheck: true });
+  const p = new Pipeline({ llm, runtime: rt, runId: "test-run-4", settings: { auditRounds: 1, codeAttempts: 2 } });
+  const state = await p.run("A small venue with meeting rooms and bookings of groups that fit the rooms.");
+  assert.equal(llm.seen.repairs, 1);
+  assert.match(llm.seen.repairPrompt, /booking_count/);
+  assert.match(llm.seen.repairPrompt, /counts the room table/); // the generator's diagnosis reaches the repair step
+  const rule = state.rules.find((r) => r.id === "booking_count");
+  assert.match(rule.code, /FROM booking/);
+  for (const v of Object.values(state.verification)) for (const [id, r] of Object.entries(v)) assert.ok(r.passed, id);
+});
+
 test("regression: an auditor that never reports leaves the round marked incomplete, not clean", async () => {
   // root cause: a missing report was read as an empty one ("no serious flaw found: done")
   const llm = scriptedModel({ auditorNeverReports: true });

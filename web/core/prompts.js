@@ -73,9 +73,14 @@ export const CODE_SYSTEM = `You write one stage of a synthetic-database generato
 Answer with the complete program in ONE \`\`\`python code block.`;
 
 export const REPAIR_SYSTEM = `You maintain the rules of a synthetic-database specification. A stage generator could
-not satisfy some rules after several attempts. Decide, per failing rule, whether it is contradictory or too tight
-for any realistic database (then loosen or rewrite it so that it stays meaningful but can be met) or merely hard
-(then keep it). Answer with ONE JSON object:
+not satisfy some rules after several attempts. Decide, per rule, which of these holds:
+- its check does not measure what its statement says (a wrong join, a count of rows instead of entities, a ratio over
+  the wrong base): fix the check so it measures the statement, and keep the statement;
+- it is contradictory with the other rules or too tight for any realistic database: loosen or rewrite it so that it
+  stays meaningful but can be met;
+- it is merely hard: keep it.
+The generator's last message may contain its own diagnosis. Verify any such claim against the rule's code and the
+other rules before acting on it: a generator may also blame a rule it simply failed to meet. Answer with ONE JSON object:
 {"rules": [{"id": "...", "op": "edit" | "keep", "statement": "...", "tables": [...], "code": "def verify_<id>(db): ..."}],
  "reason": "..."} - include only the failing rules; for "keep" give no code.`;
 

@@ -1,5 +1,5 @@
 // A scripted model for offline tests: answers each agent by its system prompt, walking every pipeline path.
-import { AUDIT_SYSTEM, CODE_SYSTEM, PLAN_SYSTEM, SPEC_SYSTEM } from "../web/core/prompts.js";
+import { AUDIT_SYSTEM, CODE_SYSTEM, PLAN_SYSTEM, REPAIR_SYSTEM, SPEC_SYSTEM } from "../web/core/prompts.js";
 
 const SPEC = {
   schema_sql: `CREATE TABLE room (room_id INTEGER PRIMARY KEY, seats INTEGER NOT NULL CHECK (seats BETWEEN 10 AND 200));
@@ -35,10 +35,17 @@ const AUDIT_RULE = { op: "add", id: "rarely_full", statement: "At most 5% of boo
 // the audit rule with a bug: it divides by the row count, so it raises on an empty database
 const AUDIT_RULE_BROKEN = { ...AUDIT_RULE, code: AUDIT_RULE.code.replace("    if not rows:\n        return {'passed': False, 'detail': 'empty'}\n", "").replace("full * 20 <= len(rows)", "full / len(rows) <= 0.05") };
 
+// a specification whose booking_count check counts rooms instead of bookings (4-8 rooms can never be 30-60)
+const SPEC_BUGGY_CHECK = { ...SPEC, rules: SPEC.rules.map((r) => (r.id === "booking_count" ? { ...r, code: r.code.replace("FROM booking", "FROM room") } : r)) };
+// a generator that stops itself with a diagnosis of that check, as live coders do
+const BOOK_DIAGNOSES = "def generate(db, rng):\n    raise ValueError('booking_count cannot be met: its check counts the room table, not bookings')\n";
+
 // options: auditorNeverReports - the auditor only ever queries (the incomplete-audit path);
-//          brokenRuleFirst - the round-1 rule raises on an empty database until the auditor is told so
-export function scriptedModel({ auditorNeverReports = false, brokenRuleFirst = false } = {}) {
-  const seen = { code: {}, audit: 0, auditTurns: 0, spec: 0 };
+//          brokenRuleFirst - the round-1 rule raises on an empty database until the auditor is told so;
+//          buggyCheck - a specification check measures the wrong table; the booking generator raises a diagnosis
+//                       until the repair step fixes the check
+export function scriptedModel({ auditorNeverReports = false, brokenRuleFirst = false, buggyCheck = false } = {}) {
+  const seen = { code: {}, audit: 0, auditTurns: 0, spec: 0, repairs: 0 };
   return {
     seen,
     usage: { calls: 0, input: 0, output: 0 },
@@ -46,12 +53,20 @@ export function scriptedModel({ auditorNeverReports = false, brokenRuleFirst = f
     async complete({ system, messages }) {
       this.usage.calls++;
       const last = messages[messages.length - 1].content;
-      if (system === SPEC_SYSTEM) return { text: "```json\n" + JSON.stringify(++seen.spec === 1 ? SPEC_BAD : SPEC) + "\n```" };
+      if (system === SPEC_SYSTEM) return { text: "```json\n" + JSON.stringify(++seen.spec === 1 ? SPEC_BAD : buggyCheck ? SPEC_BUGGY_CHECK : SPEC) + "\n```" };
+      if (system === REPAIR_SYSTEM) {
+        seen.repairs++;
+        seen.repairPrompt = last;
+        const fixed = SPEC.rules.find((r) => r.id === "booking_count");
+        return { text: JSON.stringify({ rules: [{ id: "booking_count", op: "edit", statement: fixed.statement, tables: fixed.tables, code: fixed.code }],
+          reason: "the check counted rooms" }) };
+      }
       if (system === PLAN_SYSTEM) return { text: JSON.stringify({ stages: [{ tables: ["room"], notes: "draw counts" }, { tables: ["booking"], notes: "fit groups" }] }) };
       if (system === CODE_SYSTEM) {
         const stage = /It writes: (\w+)/.exec(last)[1];
         const n = (seen.code[stage] = (seen.code[stage] || 0) + 1);
         if (stage === "room") return { text: "```python\n" + [ROOMS_FIXED, ROOMS_BY_SET, ROOMS][Math.min(n, 3) - 1] + "```" };
+        if (buggyCheck && /FROM room'\)\[0\]\[0\]\\n    return \{'passed': 30|FROM room'\)\[0\]\[0\]\n    return \{'passed': 30/.test(last)) return { text: "```python\n" + BOOK_DIAGNOSES + "```" };
         if (/rarely_full/.test(last)) return { text: "```python\n" + BOOK_REVISED + "```" };
         return { text: "```python\n" + (n === 1 ? BOOK_FEW : BOOK_OK) + "```" };
       }

@@ -2,8 +2,8 @@
 // be retried or fallen back on.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createLLM, isFatal, LLMError } from "../web/core/llm.js";
-import { Pipeline, PipelineError } from "../web/core/pipeline.js";
+import { createLLM, isFatal, LLMError } from "../../web/core/llm.js";
+import { Pipeline, PipelineError } from "../../web/core/pipeline.js";
 
 // a fake fetch: `answer(url, body)` returns [status, json] or throws; every request is recorded
 function fake(answer) {

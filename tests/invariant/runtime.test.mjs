@@ -2,8 +2,8 @@
 // verification, read-only access, the profile, and the time limit.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { nodeRuntime } from "../node/runtime-node.mjs";
-import { TimeoutError, PyRuntime } from "../web/core/runtime.js";
+import { nodeRuntime } from "../../node/runtime-node.mjs";
+import { TimeoutError, PyRuntime } from "../../web/core/runtime.js";
 
 const SCHEMA = `CREATE TABLE room (room_id INTEGER PRIMARY KEY, seats INTEGER NOT NULL CHECK (seats BETWEEN 10 AND 200));
 CREATE TABLE booking (booking_id INTEGER PRIMARY KEY, room_id INTEGER NOT NULL REFERENCES room(room_id),
