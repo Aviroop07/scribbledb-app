@@ -19,6 +19,7 @@
 
 import { AUDIT_SYSTEM, CODE_SYSTEM, PLAN_SYSTEM, REPAIR_SYSTEM, RESEARCH_SYSTEM, SPEC_FIX, SPEC_SYSTEM } from "./prompts.js";
 import { extractJson, extractPython, isFatal, LLMError } from "./llm.js";
+import { applyAnswer } from "./edits.js";
 
 export const DEFAULTS = {
   specAttempts: 4,
@@ -438,7 +439,9 @@ export class Pipeline {
       `Plan notes for this stage:\n${s.notes || "(none)"}\n\n` +
       `Rules this stage must make hold on every seed (each with its exact check):\n${rules.map((r) => `### ${r.id}: ${r.statement}\n${r.code}`).join("\n\n") || "(no rule beyond the schema)"}\n\n` +
       (later.length ? `Rules checked at a later stage that also read this stage's tables. The later stage cannot change these rows, so this stage's rows must make each rule satisfiable (each with its exact check):\n${later.map((r) => `### ${r.id} [${r.tables.join(", ")}]: ${r.statement}\n${r.code}`).join("\n\n")}\n\n` : "") +
-      (previous ? `Your previous program:\n\`\`\`python\n${previous}\n\`\`\`\n\nWhat went wrong:\n${feedback}\n\nFix the cause in the algorithm (do not special-case a seed) and give the complete program.` :
+      (previous ? `Your previous program:\n\`\`\`python\n${previous}\n\`\`\`\n\nWhat went wrong:\n${feedback}\n\nFix the cause in the algorithm (do not special-case a seed). ` +
+        "Answer with edits to the previous program, one block per change:\n<<<<<<< SEARCH\nexact lines of the previous program\n=======\ntheir replacement\n>>>>>>> REPLACE\n" +
+        "Each SEARCH text must appear exactly once in the previous program. If the algorithm must change throughout, give the complete program in one ```python block instead." :
         "Write the program.");
   }
 
@@ -466,7 +469,15 @@ export class Pipeline {
         st.update(`attempt ${attempt}${feedback ? `\nlast problems:\n${clip(feedback, 900)}` : ""}`);
         let code;
         try {
-          code = extractPython(await this.ask(CODE_SYSTEM, this.codePrompt(k, previous, feedback), 32000));
+          const answer = await this.ask(CODE_SYSTEM, this.codePrompt(k, previous, feedback), 32000);
+          // a retry may answer with edits to the previous program; an edit that does not apply is fed back, and the
+          // previous program stays the base for the next attempt
+          const applied = previous ? applyAnswer(previous, answer) : { code: extractPython(answer) };
+          if (applied.error) {
+            feedback = `Your edits did not apply: ${applied.error}. Previous problems:\n${feedback}`;
+            continue;
+          }
+          code = applied.code;
         } catch (e) {
           if (e instanceof PipelineError) throw e;
           feedback = `${e.message}`;

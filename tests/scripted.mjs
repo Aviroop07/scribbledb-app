@@ -54,7 +54,8 @@ const BOOK_HALL = BOOK_OK + "    big = db.execute('SELECT room_id, seats FROM ro
 //          buggyCheck - a specification check measures the wrong table; the booking generator raises a diagnosis
 //                       until the repair step fixes the check
 //          compositeRule - the audit adds big_hall, checked at the booking stage but only the room stage can meet it
-export function scriptedModel({ auditorNeverReports = false, brokenRuleFirst = false, buggyCheck = false, compositeRule = false } = {}) {
+//          editRetries - booking retries answer with search/replace edits (the first one does not apply)
+export function scriptedModel({ auditorNeverReports = false, brokenRuleFirst = false, buggyCheck = false, compositeRule = false, editRetries = false } = {}) {
   const seen = { code: {}, audit: 0, auditTurns: 0, spec: 0, repairs: 0 };
   return {
     seen,
@@ -82,6 +83,8 @@ export function scriptedModel({ auditorNeverReports = false, brokenRuleFirst = f
         if (stage === "room") return { text: "```python\n" + [ROOMS_FIXED, ROOMS_BY_SET, ROOMS][Math.min(n, 3) - 1] + "```" };
         if (buggyCheck && /FROM room'\)\[0\]\[0\]\\n    return \{'passed': 30|FROM room'\)\[0\]\[0\]\n    return \{'passed': 30/.test(last)) return { text: "```python\n" + BOOK_DIAGNOSES + "```" };
         if (/rarely_full/.test(last)) return { text: "```python\n" + BOOK_REVISED + "```" };
+        if (editRetries && n === 2) return { text: "<<<<<<< SEARCH\nrange(1, 12)\n=======\nrange(1, 13)\n>>>>>>> REPLACE" };
+        if (editRetries && n >= 3) return { text: "<<<<<<< SEARCH\n    for i in range(1, 11):\n=======\n    for i in range(1, r.randint(30, 60) + 1):\n>>>>>>> REPLACE" };
         return { text: "```python\n" + (n === 1 ? BOOK_FEW : BOOK_OK) + "```" };
       }
       if (system === AUDIT_SYSTEM) {

@@ -125,6 +125,17 @@ test("regression: an audit rule over two stages' tables regenerates the earlier 
   for (const v of Object.values(state.verification)) for (const [id, r] of Object.entries(v)) assert.ok(r.passed, id);
 });
 
+test("regression: a stage retry answered with edits builds the edited program; an edit that does not apply is fed back", async () => {
+  const llm = scriptedModel({ editRetries: true });
+  const p = new Pipeline({ llm, runtime: rt, checkRuntime: rt2, runId: "test-edits", settings: { auditRounds: 0 } });
+  const state = await p.run("A small venue with meeting rooms and bookings of groups that fit the rooms.");
+  // attempt 1: full program (too few bookings); attempt 2: an edit that does not apply; attempt 3: the edit that fixes it
+  assert.equal(llm.seen.code.booking, 3);
+  assert.match(state.codes[1], /range\(1, r\.randint\(30, 60\) \+ 1\)/);
+  const step = state.lineage.find((s) => s.title.startsWith("Stage 2"));
+  assert.equal(step.status, "done");
+});
+
 test("regression: an auditor that never reports leaves the round marked incomplete, not clean", async () => {
   // root cause: a missing report was read as an empty one ("no serious flaw found: done")
   const llm = scriptedModel({ auditorNeverReports: true });

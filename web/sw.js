@@ -4,7 +4,7 @@
 // are cache-first. Model calls are never cached.
 const CACHE = "scribbledb-v7-4";
 const SHELL = ["./", "index.html", "style.css", "app.js", "worker.js", "manifest.webmanifest", "icon.svg", "icon-192.png",
-  "icon-512.png", "core/er.js", "core/llm.js", "core/pipeline.js", "core/prompts.js", "core/runtime.js", "core/package.js",
+  "icon-512.png", "core/er.js", "core/edits.js", "core/llm.js", "core/pipeline.js", "core/prompts.js", "core/runtime.js", "core/package.js",
   "core/py-handler.js", "py/harness.py"];
 
 self.addEventListener("install", (e) => e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())));
