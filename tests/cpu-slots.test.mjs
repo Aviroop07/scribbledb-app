@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { nodeRuntime } from "../node/runtime-node.mjs";
+import { nodeRuntime, acquireSlot } from "../node/runtime-node.mjs";
 import { TimeoutError } from "../web/core/runtime.js";
 
 const SCHEMA = "CREATE TABLE t (id INTEGER PRIMARY KEY);";
@@ -57,4 +57,17 @@ test("a call that runs over its limit frees its slot", async () => {
   } finally {
     rt.close();
   }
+});
+
+test("regression: a slot directory Windows refuses for a moment (EPERM) is treated as busy, and a refused release does not throw", async () => {
+  const slotDir = mkdtempSync(join(tmpdir(), "sdb-slots-"));
+  let refusals = 1;
+  const fsx = {
+    mkdirSync: (p) => { if (refusals-- > 0) throw Object.assign(new Error("EPERM: operation not permitted, mkdir"), { code: "EPERM" }); mkdirSync(p); },
+    writeFileSync,
+    rmSync: () => { throw Object.assign(new Error("EPERM: operation not permitted, rmdir"), { code: "EPERM" }); },
+  };
+  const release = await acquireSlot(slotDir, 2, fsx);
+  assert.deepEqual(readdirSync(slotDir), ["slot-1"]); // slot-0 was refused, slot-1 taken
+  assert.doesNotThrow(release);
 });
