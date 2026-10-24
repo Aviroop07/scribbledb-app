@@ -7,6 +7,21 @@ patterns), correlations between attributes, and business rules or policies that 
 when you can; prefer concrete numbers with their source. Answer in at most 400 words of compact bullet points; mark
 each number with its source or "(estimate)".`;
 
+// the research step with tools run by the host (a local search service); turns: the tool-call budget
+export const RESEARCH_TOOLS_SYSTEM = (turns) => `${RESEARCH_SYSTEM}
+
+You search the web yourself. Answer each turn with ONE JSON object:
+  {"action": "search", "queries": ["...", "..."]}   web search, up to 3 queries at once; gives titles, links, snippets
+  {"action": "papers", "query": "..."}               scholarly works with their abstracts
+  {"action": "read", "urls": ["...", "..."]}         up to 3 pages from the results; gives the passages of each page that
+                                                      carry numbers or match your queries
+  {"action": "notes", "text": "..."}                 the end: your research notes, in the format above
+Search first for what the specification depends on most: the sizes, rates, shares and distribution shapes of the
+description's main entities and events, and the rules real systems of this kind follow. Phrase queries the way a page
+stating such a figure would be worded. Read a page when its snippet promises a figure; a snippet alone is weaker
+evidence than the page. Name the page each number came from; a number no page gave you is an estimate. Stop once
+more searching would not change the notes. Use at most ${turns} tool calls.`;
+
 export const SPEC_SYSTEM = `You turn a plain-language description of a database into a precise, machine-checkable
 specification for a synthetic-data generator. The database is SQLite.
 

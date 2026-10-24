@@ -5,15 +5,20 @@
 // it machine load turns into time-limit failures that a single user's browser would never see. A call's time limit
 // starts once it holds a slot. A slot is a directory slotDir/slot-<i> holding its owner's pid; a slot whose owner is
 // gone (a killed run) is reclaimed. No slots configured: no cap (tests, a single run).
+//
+// searchUrl (default: env SDB_SEARCH_URL): a local search service (openserp serve); the runtime then carries web tools
+// (runtime.web, web/core/websearch.js) and the pipeline's research step searches through them. Unset: no web tools.
 import { Worker } from "node:worker_threads";
 import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { PyRuntime } from "../web/core/runtime.js";
+import { createWebTools } from "../web/core/websearch.js";
 
 const POLL_MS = 100;
 const PID_GRACE_MS = 5000; // a slot just taken may not hold its pid file yet
 
-export function nodeRuntime({ hashSeed = 0, slots = Number(process.env.SDB_CPU_SLOTS || 0), slotDir = process.env.SDB_CPU_SLOT_DIR || "" } = {}) {
+export function nodeRuntime({ hashSeed = 0, slots = Number(process.env.SDB_CPU_SLOTS || 0), slotDir = process.env.SDB_CPU_SLOT_DIR || "",
+  searchUrl = process.env.SDB_SEARCH_URL || "" } = {}) {
   const spawn = () => {
     const w = new Worker(new URL("./py-worker.mjs", import.meta.url), { workerData: { hashSeed } });
     return {
@@ -22,7 +27,9 @@ export function nodeRuntime({ hashSeed = 0, slots = Number(process.env.SDB_CPU_S
       terminate: () => w.terminate(),
     };
   };
-  return slots > 0 && slotDir ? new SlottedRuntime(spawn, slots, slotDir) : new PyRuntime(spawn);
+  const rt = slots > 0 && slotDir ? new SlottedRuntime(spawn, slots, slotDir) : new PyRuntime(spawn);
+  if (searchUrl) rt.web = createWebTools({ searchUrl });
+  return rt;
 }
 
 class SlottedRuntime extends PyRuntime {

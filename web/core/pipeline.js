@@ -2,7 +2,8 @@
 // verified database package. Models propose; deterministic code (harness.py, the checks below) decides.
 //
 // Phases and their gates:
-//   research   what real data of this kind looks like (web search when the provider can)
+//   research   what real data of this kind looks like: the model searches through the host's web tools when the host
+//              has them (a local search service), else through the provider's own web search when it has one
 //   spec       schema, triggers, rules - must load in SQLite; every rule's verifier must run
 //   plan       stages - every table once, foreign keys respected (else a deterministic plan, logged)
 //   code       each stage: every rule of the stage passes on 3 shown seeds AND 2 hidden seeds (the coder is told a
@@ -17,7 +18,7 @@
 //              round limit
 //   package    the database, the generator, the verifiers, the DDL, the verification report, the lineage
 
-import { AUDIT_SYSTEM, CODE_SYSTEM, PLAN_SYSTEM, REPAIR_SYSTEM, RESEARCH_SYSTEM, SPEC_FIX, SPEC_SYSTEM } from "./prompts.js";
+import { AUDIT_SYSTEM, CODE_SYSTEM, PLAN_SYSTEM, REPAIR_SYSTEM, RESEARCH_SYSTEM, RESEARCH_TOOLS_SYSTEM, SPEC_FIX, SPEC_SYSTEM } from "./prompts.js";
 import { extractJson, extractPython, isFatal, LLMError } from "./llm.js";
 
 export const DEFAULTS = {
@@ -31,6 +32,7 @@ export const DEFAULTS = {
   stageTimeoutMs: 120000,
   shownSeeds: [1, 2, 3],
   research: true,
+  researchTurns: 6,
 };
 
 export class PipelineError extends Error {
@@ -121,9 +123,11 @@ export function firstRuleStage(rule, stages) {
 
 export class Pipeline {
   // checkRuntime: a second runtime started with another PYTHONHASHSEED, for the reproducibility check (omitted: no check)
-  constructor({ llm, runtime, checkRuntime, emit, settings = {}, signal, runId }) {
+  // web: the host's web tools (web/core/websearch.js); the Node runtime carries them when a local search service is set
+  constructor({ llm, runtime, checkRuntime, emit, settings = {}, signal, runId, web }) {
     this.llm = llm;
     this.rt = runtime;
+    this.web = web || runtime?.web || null;
     this.rt2 = checkRuntime || null;
     this.emit = emit || (() => {});
     this.s = { ...DEFAULTS, ...settings };
@@ -205,6 +209,10 @@ export class Pipeline {
   // -- research ---------------------------------------------------------------------------------------------------
 
   async research() {
+    if (this.web) {
+      if (await this.web.available()) return this.researchWithTools();
+      this.step("research", "The local search service does not answer").info("research uses the provider's own web search instead");
+    }
     const st = this.step("research", "Researching what real data like this looks like");
     try {
       this.checkBudget();
@@ -218,6 +226,78 @@ export class Pipeline {
       this.state.research = { text: "", source: "none" };
       st.info(`research skipped: ${e.message}`);
     }
+  }
+
+  // The model drives the host's web tools turn by turn (the auditor's protocol: one JSON action per turn) and ends with
+  // its notes. Every tool call is recorded in research.trail. A tool that fails answers the model with the failure, so
+  // the model can try another query or page; a run of turns without notes leaves research empty, as a failed search does.
+  async researchWithTools() {
+    const st = this.step("research", "Researching what real data like this looks like (local web search)");
+    const turns = this.s.researchTurns;
+    const system = RESEARCH_TOOLS_SYSTEM(turns);
+    const trail = [];
+    const queries = [];
+    const history = [];
+    let user = `Database description:\n${this.state.description}\n\nWhat does real data of this kind look like?`;
+    let notes = "";
+    let stopped = "";
+    try {
+      for (let turn = 1; turn <= turns + 1 && !notes; turn++) {
+        const last = turn > turns;
+        const prompt = last ? `${user}\n\nNo more tool calls: give your notes now.` : user;
+        const answer = await this.ask(system, prompt, 8000, history);
+        history.push({ role: "user", content: prompt }, { role: "assistant", content: answer });
+        let act;
+        try { act = extractJson(answer); } catch (e) { user = `That was not a JSON action (${e.message}). Answer with one JSON object.`; continue; }
+        if (act.action === "notes") { notes = String(act.text || "").trim(); if (!notes) user = "The notes are empty. Give them in \"text\"."; continue; }
+        if (last) { user = 'No more tool calls. Answer with {"action": "notes", "text": "..."}.'; continue; }
+        if (act.action === "search") {
+          const qs = strList(act.queries ?? act.query).slice(0, 3);
+          if (!qs.length) { user = 'A search needs "queries".'; continue; }
+          queries.push(...qs);
+          const found = await Promise.all(qs.map((q) => this.web.search(q)));
+          user = found.map((f, i) => {
+            trail.push({ turn, tool: "search", query: qs[i], engine: f.engine, results: f.hits.length });
+            const lines = f.hits.map((h, k) => `${k + 1}. ${h.title}\n   ${h.url}\n   ${clip(h.snippet, 400)}`);
+            return `Results for "${qs[i]}":\n${lines.join("\n") || `(none: ${f.errors.join("; ") || "no results"})`}`;
+          }).join("\n\n");
+          st.update(`turn ${turn}: search ${qs.map((q) => `"${q}"`).join(", ")}`);
+        } else if (act.action === "papers") {
+          const q = String(act.query || "").trim();
+          if (!q) { user = 'A paper search needs "query".'; continue; }
+          queries.push(q);
+          let works = [];
+          let error = "";
+          try { works = await this.web.papers(q); } catch (e) { error = e.message; }
+          trail.push({ turn, tool: "papers", query: q, results: works.length, ...(error ? { error } : {}) });
+          user = `Works for "${q}":\n` + (works.map((w, k) => `${k + 1}. ${w.title} (${w.year ?? "?"}, cited ${w.cited ?? "?"})\n   ${w.url}\n   ${clip(w.abstract, 700) || "(no abstract)"}`).join("\n")
+            || `(none${error ? `: ${error}` : ""})`);
+          st.update(`turn ${turn}: papers "${q}"`);
+        } else if (act.action === "read") {
+          const urls = strList(act.urls ?? act.url).slice(0, 3);
+          if (!urls.length) { user = 'A read needs "urls".'; continue; }
+          const pages = await Promise.all(urls.map((u) => this.web.read(u, [...queries])));
+          user = pages.map((p, i) => {
+            trail.push({ turn, tool: "read", url: urls[i], ok: p.ok, chars: p.text.length });
+            return `Page ${urls[i]}:\n${p.ok ? p.text : `(not read: ${p.text})`}`;
+          }).join("\n\n");
+          st.update(`turn ${turn}: read ${urls.length} page(s)`);
+        } else {
+          user = 'Unknown action. Use "search", "papers", "read" or "notes".';
+        }
+      }
+    } catch (err) {
+      const e = this.providerError(err);
+      if (e instanceof PipelineError) throw e;
+      stopped = e.message;
+      notes = "";
+    }
+    const searched = trail.filter((t) => t.tool !== "read").length;
+    const read = trail.filter((t) => t.tool === "read" && t.ok).length;
+    const source = `local web search (${searched} searches, ${read} pages read)`;
+    this.state.research = { text: notes, source, trail };
+    if (notes) st.done(`${source}\n\n${notes}`);
+    else st.info(`research gave no notes (${stopped ? `stopped: ${stopped}` : `${turns + 1} turns used`}); the specification is written without them`);
   }
 
   // -- specification ----------------------------------------------------------------------------------------------
