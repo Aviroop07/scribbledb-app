@@ -2,17 +2,18 @@
 // looks up papers itself, through calls that leave this machine as ordinary requests (no provider-side search tool,
 // no search API key).
 //
-//   const web = createWebTools({ searchUrl: "http://127.0.0.1:7070" });
+//   const web = createWebTools({ searchUrl: "http://127.0.0.1:7072" });
 //   await web.available();                      // the service answers its health check
-//   await web.search("...")                     // [{title, url, snippet}]
+//   await web.search("...")                     // {engine, hits: [{title, url, snippet}], errors}
 //   await web.papers("...")                     // [{title, year, cited, url, abstract}]
 //   await web.read(url, focusTerms)             // {ok, text} - the page passages that carry numbers or focus terms
 //
-// The search service is openserp (github.com/karust/openserp): it drives the installed browser, which is what keeps a
-// search engine answering. Plain HTTP requests to search engines are refused quietly after a few queries (DuckDuckGo
-// answers 202, Bing serves an empty result page); experiments/websearch/FINDINGS.md has the measurements. Bing goes
-// first (12/12 in the experiment), Google second. Its region/language parameters are left out: they made Bing
-// return unrelated or no results. Papers come from OpenAlex, a public scholarly index that needs no key.
+// The search service is openserp (github.com/karust/openserp, settings in node/openserp.yaml): it drives the installed
+// browser, which is what keeps a search engine answering. Plain HTTP requests to search engines are refused quietly
+// after a few queries (DuckDuckGo answers 202, Bing serves an empty result page); ScribbleDB's
+// experiments/websearch/FINDINGS.md has the measurements. Bing goes first (40/40 there, 3 searches at a time), Google
+// second (30/30). openserp's region/language parameters are left out: they made Bing return unrelated or no results.
+// Papers come from OpenAlex, a public scholarly index that needs no key.
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
 const ENGINES = ["bing", "google"];
@@ -64,7 +65,8 @@ export function createWebTools({ searchUrl, fetchImpl = globalThis.fetch.bind(gl
     try {
       res = await get(url, READ_TIMEOUT_MS, { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9", Accept: "text/html,text/plain" });
     } catch (e) {
-      return { ok: false, text: e.name === "TimeoutError" ? "the page did not answer in time" : `the page could not be fetched (${e.message})` };
+      // undici reports "fetch failed" and keeps the reason (a refused connection, a broken certificate chain) in cause
+      return { ok: false, text: e.name === "TimeoutError" ? "the page did not answer in time" : `the page could not be fetched (${e.cause?.code || e.cause?.message || e.message})` };
     }
     if (!res.ok) return { ok: false, text: `the page answered HTTP ${res.status}` };
     const type = res.headers.get("content-type") || "";

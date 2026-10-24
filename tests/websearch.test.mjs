@@ -71,13 +71,15 @@ test("read: an HTML page gives its relevant passages; errors, non-text pages and
   const page = "<p>The average length of stay is 4.5 days for inpatients in general hospitals worldwide.</p>";
   const pages = { "https://a.example/": () => html(page), "https://b.example/": () => html("x", 403),
     "https://c.example/": () => html("%PDF", 200, "application/pdf"), "https://d.example/": () => html("<script>render()</script>"),
-    "https://e.example/": () => { throw new Error("ECONNRESET"); } };
+    "https://e.example/": () => { throw new Error("ECONNRESET"); },
+    "https://f.example/": () => { throw new TypeError("fetch failed", { cause: Object.assign(new Error("x"), { code: "UNABLE_TO_VERIFY_LEAF_SIGNATURE" }) }); } };
   const web = createWebTools({ searchUrl: "http://x", fetchImpl: async (u) => pages[u]() });
   assert.deepEqual(await web.read("https://a.example/", ["length of stay"]), { ok: true, text: page.replace(/<\/?p>/g, "") });
   assert.deepEqual(await web.read("https://b.example/"), { ok: false, text: "the page answered HTTP 403" });
   assert.deepEqual(await web.read("https://c.example/"), { ok: false, text: "the page is not text (application/pdf)" });
   assert.equal((await web.read("https://d.example/")).ok, false);
   assert.match((await web.read("https://e.example/")).text, /could not be fetched \(ECONNRESET\)/);
+  assert.match((await web.read("https://f.example/")).text, /could not be fetched \(UNABLE_TO_VERIFY_LEAF_SIGNATURE\)/);
   assert.deepEqual(await web.read("file:///etc/passwd"), { ok: false, text: "not a web address" });
 });
 

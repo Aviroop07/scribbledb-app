@@ -17,7 +17,7 @@ Everything runs in your browser. CPython and SQLite run in WebAssembly ([Pyodide
 
 | phase | what happens |
 |---|---|
-| research | the model looks up what real data of this kind looks like (the provider's web search if it has one, else Wikipedia) |
+| research | the model looks up what real data of this kind looks like (on the command line with a local search service: its own searches, page reads and paper lookups; else the provider's web search if it has one, else Wikipedia) |
 | specify | schema, triggers and a list of rules, each with Python verifier code; checked by running them on an empty database |
 | plan | the tables split into stages in foreign-key order (checked; a deterministic plan is the fallback) |
 | code | one generator per stage. It must pass every rule on 3 shown seeds and 2 hidden ones. It must also use its seed: a stage whose rows are the same for every seed is rejected unless it declares its tables `FIXED`. A rule a stage cannot meet is loosened by a repair step. |
@@ -71,6 +71,29 @@ Options:
 - `--base-url URL` (for `compatible`)
 
 The key is read from `SCRIBBLE_API_KEY` or the provider's usual variable.
+
+### Local web search (command line)
+
+The research step can search the web from your machine instead of through the provider's search tool. It then
+searches, reads pages and looks up papers itself, and every call it made is listed in the package's report
+(`research.trail`). It needs no search API key and works with any provider.
+
+1. Run [openserp](https://github.com/karust/openserp) (MIT, one Go binary). It drives your installed Chrome or Edge
+   headless, because search engines quietly refuse plain HTTP requests after a few queries.
+
+   ```bash
+   openserp serve -c node/openserp.yaml
+   ```
+
+2. Point the runner at it:
+
+   ```bash
+   SDB_SEARCH_URL=http://127.0.0.1:7072 node node/run.mjs ...
+   ```
+
+The search goes to Bing first and to Google when Bing fails. Pages are read over plain HTTP. Papers come from
+[OpenAlex](https://openalex.org), which needs no key. If the service does not answer, research uses the provider's
+own search and the timeline says so. A search engine's challenge page counts as a failed search; it is never solved.
 
 ## Development
 

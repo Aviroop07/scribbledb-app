@@ -1,0 +1,33 @@
+# openserp settings for ScribbleDB's research step (see README: Local web search).
+server:
+  host: 127.0.0.1
+  port: 7072
+  raw_requests: false # browser mode: raw HTTP is refused quietly by the engines
+
+app:
+  log_format: "text"
+  log_level: "warn"
+  timeout: 30
+  block_resources: "image,font,css,media"
+  block_trackers: true
+  max_processes: 4
+
+captcha:
+  solver_enabled: false # never solve challenges; a challenge is a failed search
+
+bing:
+  rate_requests: 30
+  rate_burst: 3
+
+google:
+  rate_requests: 30
+  rate_burst: 3
+
+duckduckgo:
+  disabled: true
+yandex:
+  disabled: true
+baidu:
+  disabled: true
+ecosia:
+  disabled: true
