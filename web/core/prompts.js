@@ -47,8 +47,10 @@ the other (for example a rule on the ratio of two tables' row counts when neithe
 prefer smaller stages: one or two tables each. Every table in exactly one stage; a table's referenced tables in the
 same or an earlier stage.
 
-For each stage give notes: the algorithm that makes its rules hold by construction - decide counts and shares first
-(solve for them), then draw values from the seeded random generator, then repair; name the rules it must keep.
+For each stage give notes: the algorithm that makes its rules hold by construction - solve for the parameters of
+plausible random processes first (rates, means, spreads, skew) so every rule holds with margin, then draw counts,
+shares and values from them with the seeded random generator, then repair only what falls outside a rule; name the
+rules it must keep.
 Answer with ONE JSON object: {"stages": [{"tables": ["..."], "notes": "..."}]}.`;
 
 export const CODE_SYSTEM = `You write one stage of a synthetic-database generator: a Python 3.12 program defining
@@ -66,9 +68,14 @@ export const CODE_SYSTEM = `You write one stage of a synthetic-database generato
 - The program must USE THE SEED: different seeds must give this stage's tables different rows (counts, values,
   assignments drawn from rng within what the rules allow). A table whose content the rules fully fix (a fixed list
   the description names) may be declared at module level: FIXED = {"table_name": "why the rules fix it"}.
-- It must satisfy every rule of this stage on EVERY seed, not just likely ones: decide the counts and shares that the
-  rules require first (compute them exactly from the bounds, with margin inside the bounds), then sample values,
-  then check and repair in code before inserting. Avoid rejection loops that can run long; the stage has 60 seconds.
+- It must satisfy every rule of this stage on EVERY seed, not just likely ones, and within the rules the rows must look
+  recorded, not allocated: solve for the parameters of plausible random processes (rates, means, spreads, skew,
+  correlations between columns) that keep every rule satisfied with margin, draw counts, shares and values from them,
+  then check and repair in code before inserting, changing only what falls outside a rule.
+- Never hand out exact quotas, equal per-group counts, round-number tiers or plateaus, or the same totals on every
+  seed: real shares differ between groups and between seeds, per-entity counts are skewed (a few large, many small),
+  and measured values are not rounded to a grid unless the domain rounds them. Avoid rejection loops that can run
+  long; the stage has 60 seconds.
 - Use executemany for bulk inserts. Do not print large output.
 Answer with the complete program in ONE \`\`\`python code block.`;
 
