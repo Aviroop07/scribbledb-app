@@ -98,6 +98,22 @@ test("article addresses: PubMed Central and PubMed are recognised, other pages a
   assert.deepEqual(articleSource("https://www.ncbi.nlm.nih.gov/pmc/articles/pmc3645455/"), { pmcid: "PMC3645455" });
   assert.deepEqual(articleSource("https://pubmed.ncbi.nlm.nih.gov/33053198/"), { pmid: "33053198" });
   assert.equal(articleSource("https://example.org/pmc/articles/PMC1/"), null);
+  assert.deepEqual(articleSource("https://arxiv.org/pdf/2402.19209v3"), { arxiv: "2402.19209" });
+  assert.deepEqual(articleSource("https://ar5iv.labs.arxiv.org/html/1802.09398"), { arxiv: "1802.09398" });
+  assert.deepEqual(articleSource("https://arxiv.org/abs/math/0601001"), { arxiv: "math/0601001" });
+  assert.equal(articleSource("https://example.org/abs/2402.19209"), null);
+});
+
+test("arXiv papers are read from their HTML rendering, else the abstract page; never as PDF", async () => {
+  const paper = "<p>Abandonment was 7.5% of offered calls across the call center data.</p>";
+  const asked = [];
+  const pages = { "https://arxiv.org/html/1111.22222": () => html(paper), "https://arxiv.org/html/3333.44444": () => html("", 404),
+    "https://arxiv.org/abs/3333.44444": () => html("<p>Abstract: mean call center handling time was 4.2 minutes.</p>") };
+  const web = createWebTools({ searchUrl: "http://x", fetchImpl: async (u) => { asked.push(u); return (pages[u] || (() => html("", 404)))(); } });
+  assert.deepEqual(await web.read("https://arxiv.org/pdf/1111.22222", ["call center"]), { ok: true, text: "Abandonment was 7.5% of offered calls across the call center data." });
+  assert.deepEqual(asked, ["https://arxiv.org/html/1111.22222"]);
+  assert.match((await web.read("https://arxiv.org/abs/3333.44444v2", ["call center"])).text, /4\.2 minutes/);
+  assert.deepEqual(await web.read("https://arxiv.org/abs/5555.66666", ["call center"]), { ok: false, text: "arXiv 5555.66666 has no readable text on the queries" });
 });
 
 test("articles are read through Europe PMC: open full text (abstract and body only), else the abstract", async () => {

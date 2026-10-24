@@ -59,8 +59,9 @@ export function createWebTools({ searchUrl, fetchImpl = globalThis.fetch.bind(gl
       url: w.doi || w.id || "", abstract: abstractText(w.abstract_inverted_index) }));
   }
 
-  // A page is read over plain HTTP. Articles of the main open biomedical archive (PubMed Central, PubMed) are read
-  // through Europe PMC's public API instead: their pages answer plain requests with a browser check.
+  // A page is read over plain HTTP. Articles of two main open archives are read through their public text instead:
+  // PubMed Central and PubMed through Europe PMC's API (their pages answer plain requests with a browser check), arXiv
+  // through its HTML rendering (its PDFs are not text).
   async function read(url, focus = []) {
     if (!/^https?:\/\//i.test(url)) return { ok: false, text: "not a web address" };
     const article = articleSource(url);
@@ -87,8 +88,16 @@ export function createWebTools({ searchUrl, fetchImpl = globalThis.fetch.bind(gl
     return { ok: true, text: (await res.text()).slice(0, MAX_PAGE_BYTES) };
   }
 
-  // the full text when the article is open access in PMC, else its abstract
-  async function readArticle({ pmcid, pmid }, focus) {
+  // PMC: the full text when the article is open access, else its abstract. arXiv: the HTML paper, else the abstract page.
+  async function readArticle({ pmcid, pmid, arxiv }, focus) {
+    if (arxiv) {
+      for (const url of [`https://arxiv.org/html/${arxiv}`, `https://arxiv.org/abs/${arxiv}`]) {
+        const page = await fetchText(url, { "User-Agent": UA, Accept: "text/html" });
+        const text = page.ok ? excerpt(pageText(page.text), focus) : "";
+        if (text) return { ok: true, text };
+      }
+      return { ok: false, text: `arXiv ${arxiv} has no readable text on the queries` };
+    }
     if (!pmcid) {
       const found = await fetchText(`${EUROPE_PMC}/search?query=EXT_ID:${pmid}%20AND%20SRC:MED&resultType=core&format=json`, { Accept: "application/json" });
       if (!found.ok) return found;
@@ -119,12 +128,15 @@ const EUROPE_PMC = "https://www.ebi.ac.uk/europepmc/webservices/rest";
 const CHALLENGE_MAX_CHARS = 3000;
 const CHALLENGE = /captcha|checking your browser|verify (?:that )?you are (?:a )?human|are you a robot|just a moment|enable javascript and cookies|unusual traffic|access denied/i;
 
-// {pmcid} for a PubMed Central article address, {pmid} for a PubMed one, else null
+// {pmcid} for a PubMed Central article address, {pmid} for a PubMed one, {arxiv} for an arXiv paper (abstract, PDF
+// or HTML address, any version), else null
 export function articleSource(url) {
   const pmc = url.match(/^https?:\/\/(?:pmc\.ncbi\.nlm\.nih\.gov|(?:www\.)?ncbi\.nlm\.nih\.gov\/pmc)\/articles\/(PMC\d+)/i);
   if (pmc) return { pmcid: pmc[1].toUpperCase() };
   const pm = url.match(/^https?:\/\/pubmed\.ncbi\.nlm\.nih\.gov\/(\d+)/i);
-  return pm ? { pmid: pm[1] } : null;
+  if (pm) return { pmid: pm[1] };
+  const ax = url.match(/^https?:\/\/(?:www\.|export\.)?(?:arxiv\.org|ar5iv\.labs\.arxiv\.org)\/(?:abs|pdf|html)\/(\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?\/\d{7})/i);
+  return ax ? { arxiv: ax[1] } : null;
 }
 
 // openserp answers {results: [...]} (or a bare list); each result has title, url and description
