@@ -28,11 +28,11 @@ specification for a synthetic-data generator. The database is SQLite.
 
 Write three things:
 1. schema_sql: CREATE TABLE statements (SQLite). Use INTEGER PRIMARY KEY ids, REFERENCES for foreign keys, NOT NULL,
-   UNIQUE, and CHECK constraints for every row-level rule (ranges, allowed values, date formats like
-   CHECK (d = date(d)), relations between columns of one row). Dates are TEXT 'YYYY-MM-DD'.
-2. triggers_sql: CREATE TRIGGER statements only for rules about several rows that must hold row by row (for example
-   "a booking may not overlap another booking of the same room"): BEFORE INSERT/UPDATE ... SELECT RAISE(ABORT, '...')
-   WHERE ... ; separate triggers by a blank line. Use "" when there is none.
+   UNIQUE, and CHECK constraints for every condition a single row decides (ranges, allowed values, well-formed dates,
+   relations between columns of one row). Dates are TEXT 'YYYY-MM-DD' and their CHECK verifies that format.
+2. triggers_sql: CREATE TRIGGER statements only for conditions that every new row must meet against the rows already
+   present (a conflict with an existing row, or a running limit over rows that share a key): BEFORE INSERT/UPDATE ...
+   SELECT RAISE(ABORT, '...') WHERE ... ; separate triggers by a blank line. Use "" when there is none.
 3. rules: the rules about the data as a whole that make it realistic and match the description - sizes, proportions,
    distributions, correlations, coverage, temporal patterns. Each rule is
    {"id": "snake_case", "statement": "one plain sentence", "tables": [tables it reads],
@@ -43,7 +43,7 @@ Write three things:
 Requirements:
 - Every rule must be satisfiable together with all the others and with the schema. Give realistic ranges, never a
   single exact value unless the description fixes it; state shares and ratios relative to the data's own size.
-- Row counts: say them in rules (for example "between 300 and 600 bookings"); keep the whole database between a few
+- Row counts: state each table's size as a range in a rule; keep the whole database between a few
   hundred and a few hundred thousand rows; every table gets at least one row-count rule.
 - Prefer CHECK and foreign keys for anything a single row decides; use rules for what needs many rows.
 - 6 to 25 rules is typical; more tables need more rules. Cover what the description says, plus what real data of
@@ -59,7 +59,8 @@ is checked at the stage where the last of its tables is written, so a stage must
 anything earlier stages produced.
 
 Group tables into the same stage when a rule couples them so tightly that one cannot be generated without deciding
-the other (for example a rule on the ratio of two tables' row counts when neither can adapt afterwards). Otherwise
+the other: the rule bounds a quantity that depends on choices in both tables, and once either table is written the
+other can no longer move far enough to meet it. Otherwise
 prefer smaller stages: one or two tables each. Every table in exactly one stage; a table's referenced tables in the
 same or an earlier stage.
 
@@ -78,12 +79,12 @@ export const CODE_SYSTEM = `You write one stage of a synthetic-database generato
   triggers are enforced on every insert: an insert that breaks one raises and the stage fails.
 - rng(name) returns a random.Random seeded from the run's seed and the name (use a few named streams). It is the only
   allowed source of randomness; never use time or os.urandom. Standard library and numpy may be imported (seed numpy
-  from rng, e.g. numpy.random.default_rng(rng('np').getrandbits(64))).
+  from rng: pass rng('np').getrandbits(64) to numpy.random.default_rng).
 - The same seed must give the same rows in any Python: the stage is rebuilt in a second interpreter whose string
   hashing differs, so never let the iteration order of a set (or of a dict built from one) decide rows - sort it first.
 - The program must USE THE SEED: different seeds must give this stage's tables different rows (counts, values,
-  assignments drawn from rng within what the rules allow). A table whose content the rules fully fix (a fixed list
-  the description names) may be declared at module level: FIXED = {"table_name": "why the rules fix it"}.
+  assignments drawn from rng within what the rules allow). A table whose content the rules fully fix (the description
+  enumerates every row) may be declared at module level: FIXED = {"table_name": "why the rules fix it"}.
 - It must satisfy every rule of this stage on EVERY seed, not just likely ones, and within the rules the rows must look
   recorded, not allocated: solve for the parameters of plausible random processes (rates, means, spreads, skew,
   correlations between columns) that keep every rule satisfied with margin, draw counts, shares and values from them,
@@ -97,8 +98,8 @@ Answer with the complete program in ONE \`\`\`python code block.`;
 
 export const REPAIR_SYSTEM = `You maintain the rules of a synthetic-database specification. A stage generator could
 not satisfy some rules after several attempts. Decide, per rule, which of these holds:
-- its check does not measure what its statement says (a wrong join, a count of rows instead of entities, a ratio over
-  the wrong base): fix the check so it measures the statement, and keep the statement;
+- its check computes a different quantity from the one its statement names (it counts or divides over other rows,
+  units or groups than the statement means): fix the check so it measures the statement, and keep the statement;
 - it is contradictory with the other rules or too tight for any realistic database: loosen or rewrite it so that it
   stays meaningful but can be met;
 - it is merely hard: keep it.
@@ -113,7 +114,7 @@ generator filled in implausibly - and to propose rules that close those gaps so 
 
 Look like a domain expert would: distributions with spikes or gaps no real process makes, values piled on one number
 or on a range's edge, the same value set repeated in every database, perfectly regular spacing or ordering (values
-sorted by id, periodic patterns), missing correlations every real system shows (or impossible ones), unrealistic
+that follow the key order, or repeat at a fixed period), missing correlations every real system shows (or impossible ones), unrealistic
 proportions or sizes. You have two databases generated from different seeds; a pattern in one of them counts.
 
 A pattern is a finding only when it is larger than chance would make it: for small groups estimate how often chance
