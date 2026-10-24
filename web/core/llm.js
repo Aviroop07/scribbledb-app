@@ -215,6 +215,7 @@ export function createLLM(cfg) {
   async function once(req, signal, search) {
     let maxTokens = Math.min(req.maxTokens || 16000, MAX_TOKENS_CEILING);
     let grown = false;
+    let emptyRetried = false;
     for (let tries = 0; ; tries++) {
       try {
         const r = await dispatch({ ...req, maxTokens: Math.min(maxTokens, tokenCap) }, effort, signal, search);
@@ -227,7 +228,16 @@ export function createLLM(cfg) {
           }
           throw new LLMError(`the answer was cut off at the output limit (${r.truncated})`, 0, "truncated");
         }
-        if (!r.text.trim()) throw new LLMError("the model returned an empty answer", 0, "empty");
+        if (!r.text.trim()) {
+          // a provider may answer once with nothing (live, OpenRouter: an audit turn's empty reply ended the run);
+          // the same request is asked once more before it counts as a failure
+          if (!emptyRetried) {
+            emptyRetried = true;
+            log({ kind: "fallback", what: "the model returned an empty answer; asking again" });
+            continue;
+          }
+          throw new LLMError("the model returned an empty answer", 0, "empty");
+        }
         return r.text;
       } catch (e) {
         if (tries >= 4) throw e;
