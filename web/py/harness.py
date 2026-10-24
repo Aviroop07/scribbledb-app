@@ -48,10 +48,34 @@ def new_db(schema: str, triggers: str) -> sqlite3.Connection:
     con = sqlite3.connect(":memory:")
     con.execute("PRAGMA foreign_keys = ON")
     con.executescript(schema)
+    for sql in fk_indexes(con):
+        con.execute(sql)
     if triggers.strip():
         con.executescript(triggers)
     con.commit()
     return con
+
+
+def fk_indexes(con: sqlite3.Connection) -> list[str]:
+    """CREATE INDEX statements for every foreign key no existing index or rowid key already leads with. SQLite does
+    not index foreign-key columns itself, so a trigger that looks up a row's siblings (no overlapping bookings of
+    one room) or a foreign-key check scans the whole table on every insert: quadratic in the rows. Indexes change
+    no data; package.js's generate.py adds the same ones."""
+    out = []
+    for t in tables_of(con):
+        cols = {r[1]: r for r in con.execute(f'PRAGMA table_info("{t}")')}
+        rowid = [c for c, r in cols.items() if r[5] == 1 and r[2].upper() == "INTEGER" and sum(x[5] > 0 for x in cols.values()) == 1]
+        leads = [[r[2] for r in con.execute(f'PRAGMA index_info("{i[1]}")')] for i in con.execute(f'PRAGMA index_list("{t}")')]
+        fks = collections.defaultdict(list)
+        for r in con.execute(f'PRAGMA foreign_key_list("{t}")'):
+            fks[r[0]].append((r[1], r[3]))
+        for n, (fid, pairs) in enumerate(sorted(fks.items())):
+            fk = [c for _, c in sorted(pairs)]
+            if fk == rowid or any(ix[: len(fk)] == fk for ix in leads):
+                continue
+            leads.append(fk)
+            out.append(f'CREATE INDEX "sdb_fk_{t}_{n}" ON "{t}"({", ".join(chr(34) + c + chr(34) for c in fk)})')
+    return out
 
 
 def open_bytes(data: bytes) -> sqlite3.Connection:
