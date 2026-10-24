@@ -244,13 +244,18 @@ export class Pipeline {
     try {
       for (let turn = 1; turn <= turns + 1 && !notes; turn++) {
         const last = turn > turns;
-        const prompt = last ? `${user}\n\nNo more tool calls: give your notes now.` : user;
+        const prompt = last ? `${user}\n\nNo more tool calls. Answer with {"action": "notes", "text": "..."} now.` : user;
         const answer = await this.ask(system, prompt, 8000, history);
         history.push({ role: "user", content: prompt }, { role: "assistant", content: answer });
         let act;
-        try { act = extractJson(answer); } catch (e) { user = `That was not a JSON action (${e.message}). Answer with one JSON object.`; continue; }
+        try { act = extractJson(answer); } catch (e) {
+          // the last turn can only be the notes: written as plain text, they are the notes (live: they were lost)
+          if (last) { notes = answer.trim(); continue; }
+          user = `That was not a JSON action (${e.message}). Answer with one JSON object.`;
+          continue;
+        }
         if (act.action === "notes") { notes = String(act.text || "").trim(); if (!notes) user = "The notes are empty. Give them in \"text\"."; continue; }
-        if (last) { user = 'No more tool calls. Answer with {"action": "notes", "text": "..."}.'; continue; }
+        if (last) continue; // a tool call on the last turn is not run
         if (act.action === "search") {
           const qs = strList(act.queries ?? act.query).slice(0, 3);
           if (!qs.length) { user = 'A search needs "queries".'; continue; }

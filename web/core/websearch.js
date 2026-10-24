@@ -88,6 +88,17 @@ export function createWebTools({ searchUrl, fetchImpl = globalThis.fetch.bind(gl
     return { ok: true, text: (await res.text()).slice(0, MAX_PAGE_BYTES) };
   }
 
+  // the abstract of the Europe PMC record a query names (an EXT_ID or a PMCID), or why there is none
+  async function abstractOf(query, label, focus, why = "") {
+    const found = await fetchText(`${EUROPE_PMC}/search?query=${encodeURIComponent(query)}&resultType=core&format=json`, { Accept: "application/json" });
+    if (!found.ok) return { ok: false, text: `Europe PMC did not answer for ${label} (${found.text})` };
+    let hit;
+    try { hit = JSON.parse(found.text).resultList?.result?.[0]; } catch { hit = null; }
+    const abs = pageText(String(hit?.abstractText || ""));
+    if (!abs) return { ok: false, text: `Europe PMC has no text of ${label}${why ? ` (${why})` : ""}` };
+    return { ok: true, text: `${hit.title || ""} (abstract only)\n${excerpt(abs, focus) || abs.slice(0, EXCERPT_CHARS)}` };
+  }
+
   // PMC: the full text when the article is open access, else its abstract. arXiv: the HTML paper, else the abstract page.
   async function readArticle({ pmcid, pmid, arxiv }, focus) {
     if (arxiv) {
@@ -113,7 +124,8 @@ ${excerpt(abs, focus) || abs.slice(0, EXCERPT_CHARS)}` }
       }
     }
     const xml = await fetchText(`${EUROPE_PMC}/${pmcid}/fullTextXML`, { Accept: "application/xml" });
-    if (!xml.ok) return { ok: false, text: `Europe PMC has no full text of ${pmcid} (${xml.text})` };
+    // not every PMC article is in Europe PMC's open full-text set (live: HTTP 500): its abstract then
+    if (!xml.ok) return abstractOf(`PMCID:${pmcid}`, pmcid, focus, xml.text);
     // the abstract and the body; the front matter (affiliations, dates, licences) and the references carry numbers too
     const parts = [xml.text.match(/<abstract\b[\s\S]*?<\/abstract>/i)?.[0], xml.text.match(/<body\b[\s\S]*<\/body>/i)?.[0]].filter(Boolean);
     const text = excerpt(pageText(parts.join("\n") || xml.text), focus);

@@ -126,7 +126,10 @@ test("articles are read through Europe PMC: open full text (abstract and body on
     [/EXT_ID:222/, () => json({ resultList: { result: [{ title: "Closed paper", abstractText: "<h4>Results</h4>The rate of dental no-show was 7% per year." }] } })],
     [/EXT_ID:333/, () => json({ resultList: { result: [{ pmcid: "PMC111", isOpenAccess: "Y" }] } })],
     [/EXT_ID:444/, () => json({ resultList: { result: [] } })],
-    [/PMC999\/fullTextXML$/, () => html("", 404)],
+    [/PMC999\/fullTextXML$/, () => html("", 500)],
+    [/PMCID%3APMC999/, () => json({ resultList: { result: [{ title: "Not open", abstractText: "Dental no-show rate was 11% over two years of visits." }] } })],
+    [/PMC777\/fullTextXML$/, () => html("", 500)],
+    [/PMCID%3APMC777/, () => json({ resultList: { result: [] } })],
   ];
   const fetchImpl = async (u) => { asked.push(u); return routes.find(([re]) => re.test(u))[1](); };
   const web = createWebTools({ searchUrl: "http://x", fetchImpl });
@@ -138,7 +141,9 @@ test("articles are read through Europe PMC: open full text (abstract and body on
   assert.deepEqual(await web.read("https://pubmed.ncbi.nlm.nih.gov/222/", focus), { ok: true, text: "Closed paper (abstract only)\nThe rate of dental no-show was 7% per year." });
   assert.equal((await web.read("https://pubmed.ncbi.nlm.nih.gov/333/", focus)).text, full.text); // open access: the full text
   assert.deepEqual(await web.read("https://pubmed.ncbi.nlm.nih.gov/444/", focus), { ok: false, text: "Europe PMC has no record of PubMed 444" });
-  assert.match((await web.read("https://pmc.ncbi.nlm.nih.gov/articles/PMC999/", focus)).text, /no full text of PMC999 \(the page answered HTTP 404\)/);
+  // outside the open full-text set: the abstract, else the reason
+  assert.deepEqual(await web.read("https://pmc.ncbi.nlm.nih.gov/articles/PMC999/", focus), { ok: true, text: "Not open (abstract only)\nDental no-show rate was 11% over two years of visits." });
+  assert.deepEqual(await web.read("https://pmc.ncbi.nlm.nih.gov/articles/PMC777/", focus), { ok: false, text: "Europe PMC has no text of PMC777 (the page answered HTTP 500)" });
 });
 
 test("excerpt: a quantity earns the bonus; citation markers, years and dates do not", () => {
@@ -244,7 +249,7 @@ test("research loop: the tool budget ends with a demand for notes; no notes leav
   let p = pipelineWith(llm, fakeWeb(), { researchTurns: 2 });
   await p.research();
   assert.equal(llm.usage.calls, 3);
-  assert.match(llm.seen[2].last, /No more tool calls: give your notes now\.$/);
+  assert.match(llm.seen[2].last, /No more tool calls\. Answer with \{"action": "notes", "text": "\.\.\."\} now\.$/);
   assert.equal(p.state.research.text, "- late notes");
 
   llm = researcher(always());
@@ -254,6 +259,20 @@ test("research loop: the tool budget ends with a demand for notes; no notes leav
   assert.equal(p.state.research.trail.length, 2);
   assert.equal(p.state.research.text, "");
   assert.match(p.state.lineage.at(-1).detail, /research gave no notes \(3 turns used\)/);
+});
+
+test("regression: notes written as plain text on the last turn are the notes (live: they were lost)", async () => {
+  const llm = researcher([{ action: "search", queries: ["q"] }, "- plain notes\n- with a figure 12%"]);
+  const p = pipelineWith(llm, fakeWeb(), { researchTurns: 1 });
+  await p.research();
+  assert.equal(p.state.research.text, "- plain notes\n- with a figure 12%");
+  assert.equal(p.state.lineage.at(-1).status, "done");
+  // before the last turn a plain-text answer is still corrected
+  const early = researcher(["- notes too soon", { action: "notes", text: "- notes" }]);
+  const q = pipelineWith(early, fakeWeb());
+  await q.research();
+  assert.match(early.seen[1].last, /That was not a JSON action/);
+  assert.equal(q.state.research.text, "- notes");
 });
 
 test("research: with the search service down the provider's own search runs, and the switch is in the timeline", async () => {
