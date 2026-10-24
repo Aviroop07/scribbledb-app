@@ -10,7 +10,8 @@ each number with its source or "(estimate)".`;
 // the research step with tools run by the host (a local search service); turns: the tool-call budget
 export const RESEARCH_TOOLS_SYSTEM = (turns) => `${RESEARCH_SYSTEM}
 
-You search the web yourself. Answer each turn with ONE JSON object:
+You search the web yourself, one action per answer: the host runs the action and replies with its result in the
+next message, so write the one JSON object and nothing after it. Answer each turn with ONE JSON object:
   {"action": "search", "queries": ["...", "..."]}   web search, up to 3 queries at once; gives titles, links, snippets
   {"action": "papers", "query": "..."}               scholarly works with their abstracts
   {"action": "read", "urls": ["...", "..."]}         up to 3 pages from the results; gives the passages of each page that
