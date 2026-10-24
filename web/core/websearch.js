@@ -59,11 +59,24 @@ export function createWebTools({ searchUrl, fetchImpl = globalThis.fetch.bind(gl
       url: w.doi || w.id || "", abstract: abstractText(w.abstract_inverted_index) }));
   }
 
+  // A page is read over plain HTTP. Articles of the main open biomedical archive (PubMed Central, PubMed) are read
+  // through Europe PMC's public API instead: their pages answer plain requests with a browser check.
   async function read(url, focus = []) {
     if (!/^https?:\/\//i.test(url)) return { ok: false, text: "not a web address" };
+    const article = articleSource(url);
+    if (article) return readArticle(article, focus);
+    const page = await fetchText(url, { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9", Accept: "text/html,text/plain" });
+    if (!page.ok) return page;
+    const full = pageText(page.text);
+    if (full.length < CHALLENGE_MAX_CHARS && CHALLENGE.test(full)) return { ok: false, text: "the site answered with a bot check instead of the page" };
+    const text = excerpt(full, focus);
+    return text ? { ok: true, text } : { ok: false, text: "the page has no readable text (it may need a browser to render)" };
+  }
+
+  async function fetchText(url, headers) {
     let res;
     try {
-      res = await get(url, READ_TIMEOUT_MS, { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9", Accept: "text/html,text/plain" });
+      res = await get(url, READ_TIMEOUT_MS, headers);
     } catch (e) {
       // undici reports "fetch failed" and keeps the reason (a refused connection, a broken certificate chain) in cause
       return { ok: false, text: e.name === "TimeoutError" ? "the page did not answer in time" : `the page could not be fetched (${e.cause?.code || e.cause?.message || e.message})` };
@@ -71,12 +84,47 @@ export function createWebTools({ searchUrl, fetchImpl = globalThis.fetch.bind(gl
     if (!res.ok) return { ok: false, text: `the page answered HTTP ${res.status}` };
     const type = res.headers.get("content-type") || "";
     if (/pdf|octet-stream|image|zip/i.test(type)) return { ok: false, text: `the page is not text (${type.split(";")[0]})` };
-    const body = (await res.text()).slice(0, MAX_PAGE_BYTES);
-    const text = excerpt(pageText(body), focus);
-    return text ? { ok: true, text } : { ok: false, text: "the page has no readable text (it may need a browser to render)" };
+    return { ok: true, text: (await res.text()).slice(0, MAX_PAGE_BYTES) };
+  }
+
+  // the full text when the article is open access in PMC, else its abstract
+  async function readArticle({ pmcid, pmid }, focus) {
+    if (!pmcid) {
+      const found = await fetchText(`${EUROPE_PMC}/search?query=EXT_ID:${pmid}%20AND%20SRC:MED&resultType=core&format=json`, { Accept: "application/json" });
+      if (!found.ok) return found;
+      let hit;
+      try { hit = JSON.parse(found.text).resultList?.result?.[0]; } catch { hit = null; }
+      if (!hit) return { ok: false, text: `Europe PMC has no record of PubMed ${pmid}` };
+      if (hit.pmcid && hit.isOpenAccess === "Y") pmcid = hit.pmcid;
+      else {
+        const abs = pageText(String(hit.abstractText || ""));
+        return abs ? { ok: true, text: `${hit.title || ""} (abstract only)
+${excerpt(abs, focus) || abs.slice(0, EXCERPT_CHARS)}` }
+          : { ok: false, text: `PubMed ${pmid} has no abstract` };
+      }
+    }
+    const xml = await fetchText(`${EUROPE_PMC}/${pmcid}/fullTextXML`, { Accept: "application/xml" });
+    if (!xml.ok) return { ok: false, text: `Europe PMC has no full text of ${pmcid} (${xml.text})` };
+    // the abstract and the body; the front matter (affiliations, dates, licences) and the references carry numbers too
+    const parts = [xml.text.match(/<abstract\b[\s\S]*?<\/abstract>/i)?.[0], xml.text.match(/<body\b[\s\S]*<\/body>/i)?.[0]].filter(Boolean);
+    const text = excerpt(pageText(parts.join("\n") || xml.text), focus);
+    return text ? { ok: true, text } : { ok: false, text: `the full text of ${pmcid} has no passage on the queries` };
   }
 
   return { available, search, papers, read };
+}
+
+const EUROPE_PMC = "https://www.ebi.ac.uk/europepmc/webservices/rest";
+// a challenge page is short; a long page that mentions a captcha in passing is still read
+const CHALLENGE_MAX_CHARS = 3000;
+const CHALLENGE = /captcha|checking your browser|verify (?:that )?you are (?:a )?human|are you a robot|just a moment|enable javascript and cookies|unusual traffic|access denied/i;
+
+// {pmcid} for a PubMed Central article address, {pmid} for a PubMed one, else null
+export function articleSource(url) {
+  const pmc = url.match(/^https?:\/\/(?:pmc\.ncbi\.nlm\.nih\.gov|(?:www\.)?ncbi\.nlm\.nih\.gov\/pmc)\/articles\/(PMC\d+)/i);
+  if (pmc) return { pmcid: pmc[1].toUpperCase() };
+  const pm = url.match(/^https?:\/\/pubmed\.ncbi\.nlm\.nih\.gov\/(\d+)/i);
+  return pm ? { pmid: pm[1] } : null;
 }
 
 // openserp answers {results: [...]} (or a bare list); each result has title, url and description
@@ -103,7 +151,7 @@ export function pageText(html) {
   return String(html)
     .replace(/<(script|style|noscript|svg|head|template|iframe)\b[\s\S]*?<\/\1>/gi, " ")
     .replace(/<!--[\s\S]*?-->/g, " ")
-    .replace(/<(br|\/p|\/div|\/li|\/h[1-6]|\/tr|\/table|\/section|\/article|\/blockquote)\b[^>]*>/gi, "\n")
+    .replace(/<(br|\/p|\/div|\/li|\/h[1-6]|\/tr|\/table|\/section|\/article|\/blockquote|\/title|\/sec|\/caption)\b[^>]*>/gi, "\n")
     .replace(/<\/t[dh]>/gi, " | ")
     .replace(/<[^>]+>/g, " ")
     .replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) => {
@@ -113,14 +161,18 @@ export function pageText(html) {
     .split("\n").map((l) => l.replace(/\s+/g, " ").trim()).filter(Boolean).join("\n");
 }
 
+// a quantity, not any digit: a share, a measured value with its unit, a decimal or a thousands-grouped count. Citation
+// markers, years and dates alone do not make a passage carry a figure.
+const QUANTITY = /\d\s?(?:%|percent\b|per\s?cent\b)|\d\s?(?:minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?|kg|km|kwh|mb|gb)\b|\d\.\d|\d{1,3}(?:,\d{3})+|\bper\s(?:day|week|month|year|patient|customer|visit)\b|\b\d+\s?(?:out of|in)\s\d+\b|\b(?:mean|median|average|sd|iqr)\b[^.]{0,40}\d/i;
+
 // The passages worth the model's attention, in page order, within a character budget: a passage scores by the focus
-// terms it contains, plus one when it carries a number (research is after rates, sizes and shares).
+// terms it contains, plus one when it states a quantity (research is after rates, sizes and shares).
 export function excerpt(text, focus = [], budget = EXCERPT_CHARS) {
   const terms = [...new Set(focus.flatMap((f) => String(f).toLowerCase().split(/[^a-z0-9]+/)).filter((w) => w.length >= 4))];
   const blocks = text.split("\n").filter((b) => b.length >= 40);
   const scored = blocks.map((b, i) => {
     const low = b.toLowerCase();
-    return { i, b, score: terms.filter((t) => low.includes(t)).length + (/\d/.test(b) ? 1 : 0) };
+    return { i, b, score: terms.filter((t) => low.includes(t)).length + (QUANTITY.test(b) ? 1 : 0) };
   }).filter((x) => x.score > 0);
   scored.sort((a, b) => b.score - a.score || a.i - b.i);
   const chosen = [];

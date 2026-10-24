@@ -83,6 +83,55 @@ test("read: an HTML page gives its relevant passages; errors, non-text pages and
   assert.deepEqual(await web.read("file:///etc/passwd"), { ok: false, text: "not a web address" });
 });
 
+test("regression: a bot-check page is a failed read, not a short page (live: PMC answered plain requests with a reCAPTCHA check)", async () => {
+  const check = "<title>Checking your browser - reCAPTCHA</title><p>Checking your browser before accessing the site.</p><p>Click here if you are not automatically redirected after 5 seconds.</p>";
+  const long = `<p>${"Real content about appointment no-show rates that runs long. ".repeat(60)}</p><p>Our form uses a captcha to stop spam, and the no-show rate was 12% overall.</p>`;
+  const pages = { "https://a.example/": () => html(check), "https://b.example/": () => html(long) };
+  const web = createWebTools({ searchUrl: "http://x", fetchImpl: async (u) => pages[u]() });
+  assert.deepEqual(await web.read("https://a.example/", ["no-show"]), { ok: false, text: "the site answered with a bot check instead of the page" });
+  assert.equal((await web.read("https://b.example/", ["no-show"])).ok, true); // a long page that mentions a captcha is read
+});
+
+test("article addresses: PubMed Central and PubMed are recognised, other pages are not", async () => {
+  const { articleSource } = await import("../web/core/websearch.js");
+  assert.deepEqual(articleSource("https://pmc.ncbi.nlm.nih.gov/articles/PMC9680883/"), { pmcid: "PMC9680883" });
+  assert.deepEqual(articleSource("https://www.ncbi.nlm.nih.gov/pmc/articles/pmc3645455/"), { pmcid: "PMC3645455" });
+  assert.deepEqual(articleSource("https://pubmed.ncbi.nlm.nih.gov/33053198/"), { pmid: "33053198" });
+  assert.equal(articleSource("https://example.org/pmc/articles/PMC1/"), null);
+});
+
+test("articles are read through Europe PMC: open full text (abstract and body only), else the abstract", async () => {
+  const jats = "<article><front><aff>Dept 1, 2022, 12345</aff><abstract><p>The no-show rate was 9.5% of all dental visits.</p></abstract></front>" +
+    "<body><sec><title>Results</title><p>Mondays had 23% of appointments and an average duration of 41 minutes.</p></sec></body>" +
+    "<back><ref-list><ref>Smith 2019, 12(3):45-67 dental appointments</ref></ref-list></back></article>";
+  const asked = [];
+  const routes = [
+    [/PMC111\/fullTextXML$/, () => html(jats, 200, "application/xml")],
+    [/EXT_ID:222/, () => json({ resultList: { result: [{ title: "Closed paper", abstractText: "<h4>Results</h4>The rate of dental no-show was 7% per year." }] } })],
+    [/EXT_ID:333/, () => json({ resultList: { result: [{ pmcid: "PMC111", isOpenAccess: "Y" }] } })],
+    [/EXT_ID:444/, () => json({ resultList: { result: [] } })],
+    [/PMC999\/fullTextXML$/, () => html("", 404)],
+  ];
+  const fetchImpl = async (u) => { asked.push(u); return routes.find(([re]) => re.test(u))[1](); };
+  const web = createWebTools({ searchUrl: "http://x", fetchImpl });
+  const focus = ["dental no-show rate"];
+  const full = await web.read("https://pmc.ncbi.nlm.nih.gov/articles/PMC111/", focus);
+  assert.equal(full.ok, true);
+  assert.equal(full.text, "The no-show rate was 9.5% of all dental visits.\nMondays had 23% of appointments and an average duration of 41 minutes.");
+  assert.match(asked[0], /^https:\/\/www\.ebi\.ac\.uk\/europepmc\/webservices\/rest\/PMC111\/fullTextXML$/);
+  assert.deepEqual(await web.read("https://pubmed.ncbi.nlm.nih.gov/222/", focus), { ok: true, text: "Closed paper (abstract only)\nThe rate of dental no-show was 7% per year." });
+  assert.equal((await web.read("https://pubmed.ncbi.nlm.nih.gov/333/", focus)).text, full.text); // open access: the full text
+  assert.deepEqual(await web.read("https://pubmed.ncbi.nlm.nih.gov/444/", focus), { ok: false, text: "Europe PMC has no record of PubMed 444" });
+  assert.match((await web.read("https://pmc.ncbi.nlm.nih.gov/articles/PMC999/", focus)).text, /no full text of PMC999 \(the page answered HTTP 404\)/);
+});
+
+test("excerpt: a quantity earns the bonus; citation markers, years and dates do not", () => {
+  const cited = "Studies on clinic attendance were reviewed in earlier work 17 and in surveys 18, 19 from 2021.";
+  const figure = "Clinic attendance surveys report that about 1,250 people were seen, with a mean wait of 14 minutes overall.";
+  const ex = excerpt([cited, figure].join("\n"), ["clinic attendance"], 120);
+  assert.equal(ex, figure); // equal terms; the quantity decides within the budget
+});
+
 test("papers: OpenAlex works with title, year, citations, link and abstract", async () => {
   let asked = "";
   const web = createWebTools({ searchUrl: "http://x", fetchImpl: async (u) => { asked = u; return json({ results: [
