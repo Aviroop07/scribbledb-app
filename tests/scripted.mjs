@@ -40,11 +40,21 @@ const SPEC_BUGGY_CHECK = { ...SPEC, rules: SPEC.rules.map((r) => (r.id === "book
 // a generator that stops itself with a diagnosis of that check, as live coders do
 const BOOK_DIAGNOSES = "def generate(db, rng):\n    raise ValueError('booking_count cannot be met: its check counts the room table, not bookings')\n";
 
+// a high-severity audit rule over both tables that only the room stage can meet: one room of 170+ seats (the room
+// programs draw at most 150) and one group of 140+ people. The booking stage alone cannot add seats.
+const BIG_RULE = { op: "add", id: "big_hall", statement: "At least one room has 170 or more seats and at least one booking has 140 or more people.", tables: ["room", "booking"],
+  code: "def verify_big_hall(db):\n    s = db.query('SELECT MAX(seats) FROM room')[0][0] or 0\n    p = db.query('SELECT MAX(people) FROM booking')[0][0] or 0\n    return {'passed': s >= 170 and p >= 140, 'detail': f'{s}/{p}'}" };
+const ROOMS_HALL = ROOMS.replace("(i, r.randint(20, 150))", "(i, 180 if i == 1 else r.randint(20, 150))");
+const BOOK_HALL = BOOK_OK + "    big = db.execute('SELECT room_id, seats FROM room ORDER BY seats DESC LIMIT 1').fetchone()\n" +
+  "    if big[1] < 170:\n        raise ValueError('big_hall cannot be met here: no room has 170 seats')\n" +
+  "    db.execute('UPDATE booking SET room_id = ?, people = 145 WHERE booking_id = 1', (big[0],))\n";
+
 // options: auditorNeverReports - the auditor only ever queries (the incomplete-audit path);
 //          brokenRuleFirst - the round-1 rule raises on an empty database until the auditor is told so;
 //          buggyCheck - a specification check measures the wrong table; the booking generator raises a diagnosis
 //                       until the repair step fixes the check
-export function scriptedModel({ auditorNeverReports = false, brokenRuleFirst = false, buggyCheck = false } = {}) {
+//          compositeRule - the audit adds big_hall, checked at the booking stage but only the room stage can meet it
+export function scriptedModel({ auditorNeverReports = false, brokenRuleFirst = false, buggyCheck = false, compositeRule = false } = {}) {
   const seen = { code: {}, audit: 0, auditTurns: 0, spec: 0, repairs: 0 };
   return {
     seen,
@@ -65,6 +75,10 @@ export function scriptedModel({ auditorNeverReports = false, brokenRuleFirst = f
       if (system === CODE_SYSTEM) {
         const stage = /It writes: (\w+)/.exec(last)[1];
         const n = (seen.code[stage] = (seen.code[stage] || 0) + 1);
+        if (compositeRule && /big_hall/.test(last)) {
+          if (stage === "room") { seen.roomSawHall = true; return { text: "```python\n" + ROOMS_HALL + "```" }; }
+          return { text: "```python\n" + BOOK_HALL + "```" };
+        }
         if (stage === "room") return { text: "```python\n" + [ROOMS_FIXED, ROOMS_BY_SET, ROOMS][Math.min(n, 3) - 1] + "```" };
         if (buggyCheck && /FROM room'\)\[0\]\[0\]\\n    return \{'passed': 30|FROM room'\)\[0\]\[0\]\n    return \{'passed': 30/.test(last)) return { text: "```python\n" + BOOK_DIAGNOSES + "```" };
         if (/rarely_full/.test(last)) return { text: "```python\n" + BOOK_REVISED + "```" };
@@ -78,6 +92,10 @@ export function scriptedModel({ auditorNeverReports = false, brokenRuleFirst = f
           return { text: JSON.stringify({ action: "report", flaws: [{ id: "full_rooms", severity: "high", title: "rooms often full", evidence: "x", rule: AUDIT_RULE }] }) };
         }
         if (/^Result/.test(last)) {
+          if (compositeRule) {
+            const flaws = seen.audit === 1 ? [{ id: "no_big_hall", severity: "high", title: "no large venue", evidence: "max seats 150", rule: BIG_RULE }] : [];
+            return { text: JSON.stringify({ action: "report", flaws }) };
+          }
           const first = brokenRuleFirst ? AUDIT_RULE_BROKEN : AUDIT_RULE;
           const flaws = seen.audit === 1 ? [{ id: "full_rooms", severity: "medium", title: "rooms often full", evidence: "x", rule: first }, null]
             : [{ id: "big_groups", severity: "low", title: "groups are large", evidence: "y", rule: LOW_RULE }];

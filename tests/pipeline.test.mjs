@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { execFileSync } from "node:child_process";
 import { nodeRuntime } from "../node/runtime-node.mjs";
-import { Pipeline, validatePlan, defaultPlan, hiddenSeeds } from "../web/core/pipeline.js";
+import { Pipeline, validatePlan, defaultPlan, hiddenSeeds, ruleStage, firstRuleStage } from "../web/core/pipeline.js";
 import { packageFiles } from "../web/core/package.js";
 import { scriptedModel } from "./scripted.mjs";
 
@@ -33,8 +33,9 @@ test("the pipeline runs end to end and its package rebuilds and verifies outside
   const state = await p.run("A small venue with meeting rooms and bookings of groups that fit the rooms.");
   // the first specification was malformed (a null rule, a rule without code): fixed on the second attempt
   assert.equal(llm.seen.spec, 2);
-  // the room stage was first a fixed table (seed-use gate), then a set-order program (reproducibility check), then passed
-  assert.equal(llm.seen.code.room, 3);
+  // the room stage was first a fixed table (seed-use gate), then a set-order program (reproducibility check), then
+  // passed; the audit rule rarely_full reads the room table too, so the room stage reworks its program once for it
+  assert.equal(llm.seen.code.room, 4);
   const roomStep = state.lineage.find((s) => s.title.startsWith("Stage 1"));
   assert.equal(roomStep.status, "done");
   // the audit rule was accepted and the booking stage regenerated to meet it; the null finding was dropped
@@ -96,6 +97,26 @@ test("regression: a generator that raises a diagnosis of a broken check reaches 
   assert.match(llm.seen.repairPrompt, /counts the room table/); // the generator's diagnosis reaches the repair step
   const rule = state.rules.find((r) => r.id === "booking_count");
   assert.match(rule.code, /FROM booking/);
+  for (const v of Object.values(state.verification)) for (const [id, r] of Object.entries(v)) assert.ok(r.passed, id);
+});
+
+test("rule stages: a rule is checked at its last table's stage and first reads its earliest", () => {
+  const stages = [{ tables: ["a"] }, { tables: ["b", "c"] }, { tables: ["d"] }];
+  assert.equal(ruleStage({ tables: ["a", "d"] }, stages), 2);
+  assert.equal(firstRuleStage({ tables: ["a", "d"] }, stages), 0);
+  assert.equal(firstRuleStage({ tables: ["c", "d"] }, stages), 1);
+  assert.equal(firstRuleStage({ tables: ["zz"] }, stages), -1);
+});
+
+test("regression: an audit rule over two stages' tables regenerates the earlier stage with the rule", async () => {
+  // autotune loop 2: audit rules over two stages' tables (names of both, prices of both) were checked at the later
+  // stage, which cannot change the earlier rows; regeneration started there and the run ran out of attempts
+  const llm = scriptedModel({ compositeRule: true });
+  const p = new Pipeline({ llm, runtime: rt, runId: "test-run-composite", settings: { auditRounds: 1 } });
+  const state = await p.run("A small venue with meeting rooms and bookings of groups that fit the rooms.");
+  assert.ok(llm.seen.roomSawHall, "the room stage was regenerated and shown big_hall");
+  const rule = state.rules.find((r) => r.id === "big_hall");
+  assert.match(rule.statement, /170 or more seats/); // kept as written, not loosened
   for (const v of Object.values(state.verification)) for (const [id, r] of Object.entries(v)) assert.ok(r.passed, id);
 });
 
