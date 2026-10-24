@@ -44,19 +44,30 @@ class SlottedRuntime extends PyRuntime {
   }
 }
 
-export async function acquireSlot(dir, n) {
+// fsx: the file operations, replaceable in tests
+export async function acquireSlot(dir, n, fsx = { mkdirSync, writeFileSync, rmSync }) {
+  const release = (slot) => () => {
+    // a release that Windows refuses for a moment must not fail the call that held the slot; the directory then
+    // looks stale (its pid is this process, so it is reclaimed when this process is gone) or is removed on a retry
+    for (let t = 0; t < 5; t++) {
+      try { fsx.rmSync(slot, { recursive: true, force: true }); return; } catch { /* retry */ }
+    }
+  };
   for (;;) {
     for (let i = 0; i < n; i++) {
       const slot = join(dir, `slot-${i}`);
       try {
-        mkdirSync(slot);
+        fsx.mkdirSync(slot);
       } catch (e) {
+        // EPERM/EACCES/EBUSY: on Windows a slot directory that another process is deleting cannot be created for a
+        // moment (loop-2 runs 2026-10-24 ended as "unexpected error: EPERM ... mkdir slot-N"); treat it as occupied
+        if (e.code === "EPERM" || e.code === "EACCES" || e.code === "EBUSY") continue;
         if (e.code !== "EEXIST") throw e;
         if (stale(slot)) rmSync(slot, { recursive: true, force: true });
         continue;
       }
-      writeFileSync(join(slot, "pid"), String(process.pid));
-      return () => rmSync(slot, { recursive: true, force: true });
+      fsx.writeFileSync(join(slot, "pid"), String(process.pid));
+      return release(slot);
     }
     await new Promise((r) => setTimeout(r, POLL_MS + Math.random() * POLL_MS));
   }
