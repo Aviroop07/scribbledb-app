@@ -53,6 +53,23 @@ Answer with ONE JSON object: {"schema_sql": "...", "triggers_sql": "...", "rules
 export const SPEC_FIX = (problems) => `The specification has problems. Fix them and answer with the complete corrected
 JSON object (same format):\n- ${problems.join("\n- ")}`;
 
+// what a domain expert expects of real data of this kind, given to the stage coders and the auditor: the rules bound
+// counts and shares, but the tells that remain in generated data are mostly about how the real process works
+export const EXPECT_SYSTEM = `You are a domain expert reviewing a specification for a synthetic database before any
+data exists. The rules already bound sizes, ranges and shares. List what real data of this kind always shows that a
+generator easily gets wrong even while every rule holds:
+- how entities persist across records and carry state from one record to the next (where something is, what it is
+  doing, what it has used up) and what that forbids or forces in the next record;
+- which values depend on which, within a row and across tables, and in which direction;
+- rhythms over time: hours of the day, days of the week, seasons, trends, and how they differ between kinds of
+  entities or events;
+- shapes of distributions: skew, long tails, clusters, typical ratios between groups - and where real data is uneven
+  that a generator would make even;
+- structure of networks, assignments and sequences: who connects to whom, what repeats, what never happens.
+Give 5 to 12 properties, the most telling first. Each names the tables it concerns and says, in one or two concrete
+sentences, what real data shows; do not restate rules that already exist.
+Answer with ONE JSON object: {"expectations": [{"tables": ["..."], "property": "..."}]}.`;
+
 export const PLAN_SYSTEM = `You plan how a synthetic database is generated in stages. A stage is one program that
 inserts the rows of some tables; stages run in order and a stage can read every table written before it. Each rule
 is checked at the stage where the last of its tables is written, so a stage must be able to make its rules hold given

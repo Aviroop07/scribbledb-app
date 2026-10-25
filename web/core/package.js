@@ -222,7 +222,7 @@ export function packageFiles(state, settings = {}) {
   seeds.forEach((seed, i) => { files[dbFile(seed, i)] = state.databases[seed]; });
   files["report.json"] = JSON.stringify({ description: state.description, seeds, verification: state.verification,
     rules: state.rules.map(({ id, statement, tables, origin }) => ({ id, statement, tables, origin })), plan: state.stages,
-    audit_rounds: state.rounds, rejected_findings: state.rejected, research: state.research, settings }, null, 1) + "\n";
+    audit_rounds: state.rounds, rejected_findings: state.rejected, research: state.research, expectations: state.expectations || [], settings }, null, 1) + "\n";
   files["lineage.json"] = JSON.stringify(state.lineage, null, 1) + "\n";
   files["README.md"] = readme(state, seeds, stages);
   return files;

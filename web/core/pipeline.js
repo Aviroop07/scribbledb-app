@@ -18,7 +18,7 @@
 //              round limit
 //   package    the database, the generator, the verifiers, the DDL, the verification report, the lineage
 
-import { AUDIT_SYSTEM, CODE_SYSTEM, PLAN_SYSTEM, REPAIR_SYSTEM, RESEARCH_SYSTEM, RESEARCH_TOOLS_SYSTEM, SPEC_FIX, SPEC_SYSTEM } from "./prompts.js";
+import { AUDIT_SYSTEM, CODE_SYSTEM, EXPECT_SYSTEM, PLAN_SYSTEM, REPAIR_SYSTEM, RESEARCH_SYSTEM, RESEARCH_TOOLS_SYSTEM, SPEC_FIX, SPEC_SYSTEM } from "./prompts.js";
 import { extractJson, extractPython, isFatal, LLMError } from "./llm.js";
 import { applyAnswer } from "./edits.js";
 
@@ -34,6 +34,8 @@ export const DEFAULTS = {
   shownSeeds: [1, 2, 3],
   research: true,
   researchTurns: 6,
+  // a domain expert's list of what real data of this kind shows, given to the coders and the auditor
+  expectations: true,
 };
 
 export class PipelineError extends Error {
@@ -136,7 +138,7 @@ export class Pipeline {
     this.runId = runId || `${Date.now()}`;
     this.hidden = hiddenSeeds(this.runId);
     this.stepSeq = 0;
-    this.state = { description: "", research: null, schema: "", triggers: "", rules: [], tables: [], stages: [],
+    this.state = { description: "", research: null, expectations: [], schema: "", triggers: "", rules: [], tables: [], stages: [],
       codes: [], fixed: [], rounds: [], rejected: [], verification: {}, databases: {}, lineage: [] };
   }
 
@@ -196,6 +198,7 @@ export class Pipeline {
     this.emit({ type: "start", runId: this.runId, hiddenSeeds: this.hidden.length });
     if (this.s.research) await this.research();
     await this.specify();
+    if (this.s.expectations) await this.expect();
     await this.planStages();
     await this.codeFrom(0);
     for (let round = 1; round <= this.s.auditRounds; round++) {
@@ -380,6 +383,37 @@ export class Pipeline {
 
   // -- plan -------------------------------------------------------------------------------------------------------
 
+  // What real data of this kind shows that a generator easily misses (process structure, dependencies, rhythms,
+  // shapes): one call after the specification. The list guides the stage coders (each sees the properties of its
+  // tables) and the auditor (it checks them first); it adds no rule and gates nothing (live analysis 2026-10-25: the
+  // judge's residual flaws were mostly about how the real process works, and audit rules did not reduce them).
+  async expect() {
+    const st = this.step("spec", "Listing what real data of this kind shows");
+    const known = new Map(this.state.tables.map((t) => [t.name.toLowerCase(), t.name]));
+    const user = `Description:\n${this.state.description}\n\nResearch notes:\n${this.state.research?.text || "(none)"}\n\nSchema:\n${this.state.schema}\n\n` +
+      `Rules that already exist:\n${this.state.rules.map((r) => `- ${r.id} [${r.tables.join(", ")}]: ${r.statement}`).join("\n")}`;
+    try {
+      const answer = extractJson(await this.ask(EXPECT_SYSTEM, user, 8000));
+      const list = (Array.isArray(answer.expectations) ? answer.expectations : []).filter(isObj).map((e) => ({
+        tables: strList(e.tables).map((t) => known.get(t.toLowerCase())).filter(Boolean),
+        property: String(e.property || "").trim().slice(0, 600),
+      })).filter((e) => e.tables.length && e.property).slice(0, 12);
+      this.state.expectations = list;
+      if (list.length) st.done(`${list.length} properties:\n${list.map((e) => `- [${e.tables.join(", ")}] ${e.property}`).join("\n")}`);
+      else st.info("no usable properties; generation goes on without them");
+    } catch (e) {
+      if (e instanceof PipelineError) throw e;
+      this.state.expectations = [];
+      st.info(`no usable properties (${e.message}); generation goes on without them`);
+    }
+  }
+
+  // the properties concerning any of these tables, as prompt lines
+  expectationsFor(tables) {
+    const own = new Set(tables);
+    return (this.state.expectations || []).filter((e) => e.tables.some((t) => own.has(t))).map((e) => `- [${e.tables.join(", ")}] ${e.property}`);
+  }
+
   async planStages() {
     const st = this.step("plan", "Planning the generation stages");
     const tables = this.state.tables;
@@ -522,6 +556,7 @@ export class Pipeline {
     return `Database description:\n${this.state.description}\n\nSchema (SQLite):\n${this.state.schema}\n\nTriggers:\n${this.state.triggers || "(none)"}\n\n` +
       `This is stage ${k + 1} of ${this.state.stages.length}. It writes: ${s.tables.join(", ")}. Already written by earlier stages (readable): ${earlier.join(", ") || "nothing"}.\n` +
       `Plan notes for this stage:\n${s.notes || "(none)"}\n\n` +
+      (this.expectationsFor(s.tables).length ? `What real data of this kind shows, where this stage's tables are concerned (no check enforces these; make the rows show them while every rule holds):\n${this.expectationsFor(s.tables).join("\n")}\n\n` : "") +
       `Rules this stage must make hold on every seed (each with its exact check):\n${rules.map((r) => `### ${r.id}: ${r.statement}\n${r.code}`).join("\n\n") || "(no rule beyond the schema)"}\n\n` +
       (later.length ? `Rules checked at a later stage that also read this stage's tables. The later stage cannot change these rows, so this stage's rows must make each rule satisfiable (each with its exact check):\n${later.map((r) => `### ${r.id} [${r.tables.join(", ")}]: ${r.statement}\n${r.code}`).join("\n\n")}\n\n` : "") +
       (previous ? `Your previous program:\n\`\`\`python\n${previous}\n\`\`\`\n\nWhat went wrong:\n${feedback}\n\nFix the cause in the algorithm (do not special-case a seed). ` +
@@ -679,6 +714,7 @@ export class Pipeline {
     const fixedDecl = this.state.fixed.flatMap((f) => Object.entries(f).map(([t, why]) => `${t}: ${why}`));
     let user = `Description:\n${this.state.description}\n\nResearch notes:\n${this.state.research?.text || "(none)"}\n\nSchema:\n${this.state.schema}\n\n` +
       `Triggers:\n${this.state.triggers || "(none)"}\n\nRules the data already satisfies:\n${this.state.rules.map((r) => `- ${r.id} [${r.tables.join(", ")}]: ${r.statement}`).join("\n")}\n\n` +
+      (this.state.expectations?.length ? `What a domain expert expects of real data of this kind (check these first):\n${this.state.expectations.map((e) => `- [${e.tables.join(", ")}] ${e.property}`).join("\n")}\n\n` : "") +
       `Tables the generator declared fixed: ${fixedDecl.join("; ") || "none"}\n\nThe two databases are seeds ${seedNames.join(" and ")}. Profiles:\n` +
       clip(JSON.stringify(profiles), 14000) + `\n\nStatistics identical on both databases: ${same.join("; ") || "none"}`;
     const history = [];
