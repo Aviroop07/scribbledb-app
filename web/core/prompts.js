@@ -61,7 +61,7 @@ generator easily gets wrong even while every rule holds:
 - how entities persist across records and carry state from one record to the next (where something is, what it is
   doing, what it has used up) and what that forbids or forces in the next record;
 - which values depend on which, within a row and across tables, and in which direction;
-- rhythms over time: hours of the day, days of the week, seasons, trends, and how they differ between kinds of
+- rhythms over time: hours of the day, days of the week, times of the year, trends, and how they differ between kinds of
   entities or events;
 - shapes of distributions: skew, long tails, clusters, typical ratios between groups - and where real data is uneven
   that a generator would make even;
