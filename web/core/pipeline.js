@@ -538,19 +538,25 @@ export class Pipeline {
     // unless a new rule checked later reads its tables (its own checks cannot see that rule, so passing them proves
     // nothing about it): then the coder reworks the program with that rule as the reason
     let previous = this.state.codes[k] || "";
-    let feedback = "";
+    // problems: what the last evaluated program did wrong; note: what happened since (an answer that could not be used,
+    // revised rules). The coder sees the newest note once, then the problems - the notes never pile up (live: answers
+    // without a program stacked "Previous problems:" six deep)
+    let problems = "";
+    let note = "";
+    const feedbackNow = () => (note && problems ? `${note}\n\nThe previous program's problems:\n${problems}` : note || problems);
     if (previous && revise) {
-      feedback = revise;
+      problems = revise;
     } else if (previous) {
       const ev = await this.evaluate(k, previous, this.s.shownSeeds, false);
       const hid = ev.ok ? await this.evaluate(k, previous, this.hidden, true) : null;
       if (ev.ok && hid.ok) { st.done("the existing program still passes every rule"); return; }
-      feedback = ev.ok ? hid.feedback : ev.feedback;
+      problems = ev.ok ? hid.feedback : ev.feedback;
     }
     for (;;) {
       let lastFails = [];
       let lastRaised = false;
       for (let attempt = 1; attempt <= this.s.codeAttempts; attempt++) {
+        const feedback = feedbackNow();
         st.update(`attempt ${attempt}${feedback ? `\nlast problems:\n${clip(feedback, 900)}` : ""}`);
         let code;
         try {
@@ -559,13 +565,17 @@ export class Pipeline {
           // previous program stays the base for the next attempt
           const applied = previous ? applyAnswer(previous, answer) : { code: extractPython(answer) };
           if (applied.error) {
-            feedback = `Your edits did not apply: ${applied.error}. Previous problems:\n${feedback}`;
+            note = /no Python code block/.test(applied.error)
+              // an answer that only argues the rules cannot be met: the argument reaches the rule review only through a
+              // program that raises it, so ask for one
+              ? "Your answer held neither a program nor edits. Answer with a program. If you are sure a rule cannot be met, the program may raise an exception that states why: the rules are then reviewed."
+              : `Your edits did not apply: ${applied.error}.`;
             continue;
           }
           code = applied.code;
         } catch (e) {
           if (e instanceof PipelineError) throw e;
-          feedback = `${e.message}`;
+          note = `${e.message}`;
           continue;
         }
         const ev = await this.evaluate(k, code, this.s.shownSeeds, false);
@@ -588,7 +598,8 @@ export class Pipeline {
           return;
         }
         previous = code;
-        feedback = result.feedback;
+        problems = result.feedback;
+        note = "";
         lastFails = result.fails || [];
         lastRaised = Boolean(result.raised);
       }
@@ -596,11 +607,11 @@ export class Pipeline {
       // infeasible or whose check measures the wrong thing (baseline 2026-10-22: 4 of 5 failed runs ended this way
       // without repair ever running)
       if (repairsLeft-- <= 0 || (!lastFails.length && !lastRaised)) {
-        st.fail(`no program passed after ${this.s.codeAttempts} attempts:\n${clip(feedback, 1500)}`);
-        throw new PipelineError(`stage ${k + 1} (${s.tables.join(", ")}) could not be generated: ${clip(feedback, 600)}`, this.state);
+        st.fail(`no program passed after ${this.s.codeAttempts} attempts:\n${clip(feedbackNow(), 1500)}`);
+        throw new PipelineError(`stage ${k + 1} (${s.tables.join(", ")}) could not be generated: ${clip(feedbackNow(), 600)}`, this.state);
       }
-      await this.repair(k, lastFails.length ? lastFails : this.namedRules(k, feedback), feedback);
-      feedback = `The rules were revised after your attempts. Previous problems:\n${feedback}`;
+      await this.repair(k, lastFails.length ? lastFails : this.namedRules(k, problems), problems);
+      note = "The rules were revised after your attempts.";
     }
   }
 
@@ -615,7 +626,10 @@ export class Pipeline {
     const st = this.step("repair", `Stage ${k + 1}: reviewing rules the generator could not meet`);
     const ids = [...new Set(fails.map((f) => f.rule))];
     const rules = this.state.rules.filter((r) => ids.includes(r.id));
-    const user = `Description:\n${this.state.description}\n\nSchema:\n${this.state.schema}\n\nFailing rules (with checks):\n${rules.map((r) => `### ${r.id}: ${r.statement}\n${r.code}`).join("\n\n")}\n\n` +
+    // the triggers too: a generator's diagnosis often names one (live: without them repair twice kept a rule a trigger
+    // made impossible, "no such trigger is shown")
+    const user = `Description:\n${this.state.description}\n\nSchema:\n${this.state.schema}\n\nTriggers:\n${this.state.triggers || "(none)"}\n\n` +
+      `Failing rules (with checks):\n${rules.map((r) => `### ${r.id}: ${r.statement}\n${r.code}`).join("\n\n")}\n\n` +
       `All rules of this stage:\n${this.rulesOf(k).map((r) => `- ${r.id}: ${r.statement}`).join("\n")}\n\nThe generator's last failures:\n${clip(feedback, 3000)}`;
     let answer;
     try { answer = extractJson(await this.ask(REPAIR_SYSTEM, user, 16000)); } catch (e) {

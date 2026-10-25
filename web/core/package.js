@@ -9,7 +9,7 @@ Runs the stage programs in generator/ in order on a fresh database with schema.s
 app did: each stage may write only its own tables (its triggers aside); rng(name) is seeded from (seed, stage, name);
 the global random module and numpy's global generator are reseeded per stage. When the package ships a database for
 SEED, the rebuild is compared with it table by table."""
-import argparse, hashlib, json, os, random, sqlite3, sys
+import argparse, hashlib, json, os, random, re, sqlite3, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WRITE = {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE}
@@ -60,6 +60,49 @@ def fk_indexes(con):
     return out
 
 
+TRIGGER_FROM = re.compile(r"\\bFROM\\s+\\"?(\\w+)\\"?(?:\\s+(?:AS\\s+)?(\\w+))?\\s+WHERE\\s+(.*?)(?=\\bGROUP\\b|\\bORDER\\b|;|$)", re.I | re.S)
+TRIGGER_CMP = r"(\\w+)\\s*(=|<=|>=|<|>)\\s*(?=NEW\\.|OLD\\.|'|-?\\d)"
+
+
+def trigger_indexes(con, triggers):
+    # the app's harness also indexes the lookups inside triggers (speed only; no data changes)
+    if not triggers.strip():
+        return []
+    try:
+        names = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")}
+        wanted = {}
+        for m in TRIGGER_FROM.finditer(triggers):
+            t, alias, where = m.group(1), (m.group(2) or ""), m.group(3)
+            if t not in names or alias.upper() in ("WHERE", "JOIN", "ON"):
+                continue
+            info = list(con.execute(f'PRAGMA table_info("{t}")'))
+            cols = {r[1].lower(): r[1] for r in info}
+            pk = [r[1].lower() for r in info if r[5]]
+            prefix = r"(?:" + re.escape(alias) + r"\\.)" if alias else r"(?:\\w+\\.)?"
+            eq, rng = [], []
+            for c, op in re.findall(prefix + TRIGGER_CMP, where, re.I):
+                c = c.lower()
+                if c not in cols:
+                    continue
+                if op == "=" and c not in eq:
+                    eq.append(c)
+                elif op != "=" and c not in rng:
+                    rng.append(c)
+            if not eq or (len(pk) == 1 and pk[0] in eq):
+                continue
+            key = sorted(eq) + [c for c in rng[:1] if c not in eq]
+            leads = [[r[2].lower() for r in con.execute(f'PRAGMA index_info("{i[1]}")') if r[2]] for i in con.execute(f'PRAGMA index_list("{t}")').fetchall()]
+            if any(sorted(ix[: len(eq)]) == sorted(eq) and (len(key) == len(eq) or ix[len(eq): len(eq) + 1] == key[len(eq):]) for ix in leads):
+                continue
+            wanted.setdefault(f"sdb_tix_{t}_{'_'.join(key)}"[:60], [t] + [cols[c] for c in key])
+        keep = [v for v in wanted.values()
+                if not any(o is not v and o[0] == v[0] and len(o) > len(v) and o[: len(v)] == v for o in wanted.values())]
+        return [f'CREATE INDEX IF NOT EXISTS "sdb_tix_{n}" ON "{v[0]}"({", ".join(chr(34) + c + chr(34) for c in v[1:])})'
+                for n, v in enumerate(keep)]
+    except (sqlite3.Error, re.error):
+        return []
+
+
 def table_rows(con):
     names = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
     return {t: sorted(repr(r) for r in con.execute(f'SELECT * FROM "{t}"')) for t in names}
@@ -75,9 +118,12 @@ def main():
     con = sqlite3.connect(a.out)
     con.execute("PRAGMA foreign_keys = ON")
     con.executescript(open(os.path.join(HERE, "schema.sql"), encoding="utf-8").read())
-    for sql in fk_indexes(con):
-        con.execute(sql)
     trig = open(os.path.join(HERE, "triggers.sql"), encoding="utf-8").read()
+    for sql in fk_indexes(con) + trigger_indexes(con, trig):
+        try:
+            con.execute(sql)
+        except sqlite3.Error:
+            pass
     if trig.strip():
         con.executescript(trig)
     con.commit()

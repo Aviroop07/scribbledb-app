@@ -44,6 +44,8 @@ test("regression: a trigger's sibling lookup on a foreign key searches the index
   const db = await built();
   const plan = await q(db, "EXPLAIN QUERY PLAN SELECT 1 FROM booking s WHERE s.room_id = 3 AND s.start_at < 100 AND 50 < s.end_at");
   assert.ok(plan.ok, plan.error);
-  assert.match(JSON.stringify(plan.rows), /USING INDEX sdb_fk_booking_0/);
+  // the foreign-key index, or the trigger-lookup index (room_id, start_at) that also serves the range
+  assert.match(JSON.stringify(plan.rows), /USING INDEX sdb_(fk_booking_0|tix_\d+)/);
+  assert.doesNotMatch(JSON.stringify(plan.rows), /SCAN/);
   assert.deepEqual((await q(db, "SELECT COUNT(*) FROM booking")).rows, [[400]]);
 });
