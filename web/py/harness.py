@@ -238,6 +238,14 @@ def check_spec(schema: str, triggers: str, verifiers: str, rule_codes: list | No
         info = table_info(con)
         if not info:
             problems.append("the schema defines no table")
+        # a foreign key must reference the parent's primary key or UNIQUE columns: SQLite loads such a schema but
+        # fails every insert into the child with "foreign key mismatch", which no generator or rule repair can fix
+        # (live: a run died on rooms(room_type), a non-unique column)
+        for t in tables_of(con):
+            try:
+                con.execute(f'PRAGMA foreign_key_check("{t}")').fetchall()
+            except sqlite3.Error as e:
+                problems.append(f"{e}: a foreign key must reference the parent table's primary key or columns declared UNIQUE")
     except Exception as e:
         return {"ok": False, "problems": [f"schema.sql / triggers.sql do not load in SQLite: {e}"], "tables": [],
                 "rules": []}
