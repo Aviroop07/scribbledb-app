@@ -18,9 +18,10 @@ Everything runs in your browser. CPython and SQLite run in WebAssembly ([Pyodide
 | phase | what happens |
 |---|---|
 | research | the model looks up what real data of this kind looks like (on the command line with a local search service: its own searches, page reads and paper lookups; else the provider's web search if it has one, else Wikipedia) |
-| specify | schema, triggers and a list of rules, each with Python verifier code; checked by running them on an empty database |
+| specify | schema, triggers and a list of rules, each with Python verifier code; checked by running them on an empty database (a foreign key must reference a primary key or UNIQUE columns) |
+| expectations | a domain-expert step lists 5-12 properties real data of this kind shows that the rules leave open (how records carry state, which values depend on which, rhythms over time, distribution shapes); each stage's coder gets the ones about its tables and the auditor checks them first |
 | plan | the tables split into stages in foreign-key order (checked; a deterministic plan is the fallback) |
-| code | one generator per stage. It must pass every rule on 3 shown seeds and 2 hidden ones. It must also use its seed: a stage whose rows are the same for every seed is rejected unless it declares its tables `FIXED`. A rule a stage cannot meet is loosened by a repair step. |
+| code | one generator per stage. It must pass every rule on 3 shown seeds and 2 hidden ones. It must also use its seed: a stage whose rows are the same for every seed is rejected unless it declares its tables `FIXED`. A retry may answer with search/replace edits to its previous program. A rule a stage cannot meet is loosened by a repair step. Foreign keys and the lookups inside triggers get indexes, so inserts stay fast. |
 | audit | an auditor queries the databases with SQL and Python, looks for what gives the data away as generated, and adds or edits rules. A new rule is accepted only if it runs and actually fails on the current data. The affected stages are then regenerated. This repeats until no serious flaw is left or the round limit is reached. |
 | verify | the final databases are built and every rule is checked again |
 

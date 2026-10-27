@@ -1,5 +1,5 @@
 // A scripted model for offline tests: answers each agent by its system prompt, walking every pipeline path.
-import { AUDIT_SYSTEM, CODE_SYSTEM, PLAN_SYSTEM, REPAIR_SYSTEM, SPEC_SYSTEM } from "../web/core/prompts.js";
+import { AUDIT_SYSTEM, CODE_SYSTEM, EXPECT_SYSTEM, PLAN_SYSTEM, REPAIR_SYSTEM, SPEC_SYSTEM } from "../web/core/prompts.js";
 
 const SPEC = {
   schema_sql: `CREATE TABLE room (room_id INTEGER PRIMARY KEY, seats INTEGER NOT NULL CHECK (seats BETWEEN 10 AND 200));
@@ -71,6 +71,12 @@ export function scriptedModel({ auditorNeverReports = false, brokenRuleFirst = f
         const fixed = SPEC.rules.find((r) => r.id === "booking_count");
         return { text: JSON.stringify({ rules: [{ id: "booking_count", op: "edit", statement: fixed.statement, tables: fixed.tables, code: fixed.code }],
           reason: "the check counted rooms" }) };
+      }
+      if (system === EXPECT_SYSTEM) {
+        seen.expect = (seen.expect || 0) + 1;
+        return { text: JSON.stringify({ expectations: [
+          { tables: ["room"], property: "Capacities cluster at a few common sizes." },
+          { tables: ["booking", "room"], property: "Most groups use well under the seats they book." }] }) };
       }
       if (system === PLAN_SYSTEM) return { text: JSON.stringify({ stages: [{ tables: ["room"], notes: "draw counts" }, { tables: ["booking"], notes: "fit groups" }] }) };
       if (system === CODE_SYSTEM) {
